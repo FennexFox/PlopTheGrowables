@@ -6,12 +6,15 @@
 
 namespace PlopTheGrowables
 {
+    using System;
     using Colossal.Logging;
     using Game;
     using Game.Buildings;
     using Game.Common;
     using Game.Objects;
+    using Game.Prefabs;
     using Game.Tools;
+    using Unity.Collections;
     using Unity.Entities;
 
     /// <summary>
@@ -64,6 +67,24 @@ namespace PlopTheGrowables
         /// </summary>
         protected override void OnUpdate()
         {
+            int count = _emptyQuery.CalculateEntityCount();
+            if (count == 0)
+            {
+                return;
+            }
+
+            using NativeArray<Entity> entities = _emptyQuery.ToEntityArray(Allocator.Temp);
+            ComponentLookup<PrefabRef> prefabs = SystemAPI.GetComponentLookup<PrefabRef>(true);
+            int sampleCount = Math.Min(entities.Length, 8);
+            _log.Info(CompatibilityProbeLog.Format("summary", $"system=PloppedBuildingSystem, action=tag_plopped_buildings, count={count}, lock_plopped_buildings={CompatibilityProbeLog.FormatBool(LockPloppedBuildings)}"));
+            for (int i = 0; i < sampleCount; i++)
+            {
+                Entity entity = entities[i];
+                string prefab = prefabs.HasComponent(entity) ? CompatibilityProbeLog.FormatEntity(prefabs[entity].m_Prefab) : "null";
+                bool alreadyLocked = EntityManager.HasComponent<LevelLocked>(entity);
+                _log.Info(CompatibilityProbeLog.Format("detail", $"system=PloppedBuildingSystem, building={CompatibilityProbeLog.FormatEntity(entity)}, prefab={prefab}, already_level_locked={CompatibilityProbeLog.FormatBool(alreadyLocked)}, add_plopped_building=true, add_level_locked={CompatibilityProbeLog.FormatBool(LockPloppedBuildings)}"));
+            }
+
             // Tag any newly-plopped buildings as plopped, and level-lock them if that setting is set.
             EntityManager.AddComponent(_emptyQuery, LockPloppedBuildings ? _lockedAndPlopped : _ploppedOnly);
         }

@@ -6,6 +6,7 @@
 
 namespace PlopTheGrowables
 {
+    using System;
     using Colossal.Entities;
     using Game;
     using Game.Buildings;
@@ -27,6 +28,7 @@ namespace PlopTheGrowables
         private EntityQuery _allUnlockedBuildingsQuery;
         private EntityQuery _abandonedBuildingsQuery;
         private EntityQuery _buildingConfigurationQuery;
+        private bool _loggedExistingClassificationSamples;
 
         /// <summary>
         /// Gets the active instance.
@@ -36,12 +38,20 @@ namespace PlopTheGrowables
         /// <summary>
         /// Applies level-locking to all eligible buildings.
         /// </summary>
-        internal void LockAllBuildings() => EntityManager.AddComponent<LevelLocked>(_allUnlockedBuildingsQuery);
+        internal void LockAllBuildings()
+        {
+            LogBulkAction("lock_all", _allUnlockedBuildingsQuery, addLocked: true);
+            EntityManager.AddComponent<LevelLocked>(_allUnlockedBuildingsQuery);
+        }
 
         /// <summary>
         /// Removes level-locking from all eligible buildings.
         /// </summary>
-        internal void UnlockAllBuildings() => EntityManager.RemoveComponent<LevelLocked>(_allLockedBuildingsQuery);
+        internal void UnlockAllBuildings()
+        {
+            LogBulkAction("unlock_all", _allLockedBuildingsQuery, addLocked: false);
+            EntityManager.RemoveComponent<LevelLocked>(_allLockedBuildingsQuery);
+        }
 
         /// <summary>
         /// Removes abandonment from all eligible buildings.
@@ -118,7 +128,28 @@ namespace PlopTheGrowables
         protected override void OnUpdate()
         {
             // Set any existing uncategorised buildings as spawned.
-            Mod.Instance.Log.Info($"Setting {_emptyQuery.CalculateEntityCount()} existing buildings as spawned.");
+            int count = _emptyQuery.CalculateEntityCount();
+            if (count == 0)
+            {
+                return;
+            }
+
+            using NativeArray<Entity> entities = _emptyQuery.ToEntityArray(Allocator.Temp);
+            ComponentLookup<PrefabRef> prefabs = SystemAPI.GetComponentLookup<PrefabRef>(true);
+            Mod.Instance.Log.Info(CompatibilityProbeLog.Format("summary", $"system=ExistingBuildingSystem, action=classify_existing_spawned, count={count}"));
+            if (!_loggedExistingClassificationSamples)
+            {
+                int sampleCount = Math.Min(entities.Length, 8);
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    Entity entity = entities[i];
+                    string prefab = prefabs.HasComponent(entity) ? CompatibilityProbeLog.FormatEntity(prefabs[entity].m_Prefab) : "null";
+                    Mod.Instance.Log.Info(CompatibilityProbeLog.Format("detail", $"system=ExistingBuildingSystem, action=classify_existing_spawned, building={CompatibilityProbeLog.FormatEntity(entity)}, prefab={prefab}, add_spawned_building=true"));
+                }
+
+                _loggedExistingClassificationSamples = true;
+            }
+
             EntityManager.AddComponent<SpawnedBuilding>(_emptyQuery);
         }
 
@@ -129,6 +160,18 @@ namespace PlopTheGrowables
         {
             Instance = null;
             base.OnDestroy();
+        }
+
+        /// <summary>
+        /// Logs a bulk lock or unlock action.
+        /// </summary>
+        /// <param name="eventName">Event name.</param>
+        /// <param name="query">Target query.</param>
+        /// <param name="addLocked">Whether the action is adding or removing the lock.</param>
+        private void LogBulkAction(string eventName, EntityQuery query, bool addLocked)
+        {
+            int count = query.CalculateEntityCount();
+            Mod.Instance.Log.Info(CompatibilityProbeLog.Format("summary", $"system=ExistingBuildingSystem, action={eventName}, count={count}, add_level_locked={CompatibilityProbeLog.FormatBool(addLocked)}"));
         }
     }
 }

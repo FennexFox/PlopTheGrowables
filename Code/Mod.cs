@@ -72,6 +72,7 @@ namespace PlopTheGrowables
 
             // Load saved settings.
             AssetDatabase.global.LoadSettings("PlopTheGrowables", ActiveSettings, new ModSettings(this));
+            Log.Info(CompatibilityProbeLog.Format("summary", $"system=Mod, event=settings_snapshot, disable_levelling={CompatibilityProbeLog.FormatBool(ActiveSettings.DisableLevelling)}, lock_plopped_buildings={CompatibilityProbeLog.FormatBool(ActiveSettings.LockPloppedBuildings)}, no_abandonment={CompatibilityProbeLog.FormatBool(ActiveSettings.NoAbandonment)}, spawned_zone_despawn={CompatibilityProbeLog.FormatBool(ActiveSettings.SpawnedZoneDespawn)}"));
 
             // Disable game zone check system.
             updateSystem.World.GetOrCreateSystemManaged<ZoneCheckSystem>().Enabled = false;

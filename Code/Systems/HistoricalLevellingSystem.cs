@@ -6,6 +6,7 @@
 
 namespace PlopTheGrowables
 {
+    using System.Collections.Generic;
     using System.Reflection;
     using Colossal.Collections;
     using Colossal.Mathematics;
@@ -31,9 +32,12 @@ namespace PlopTheGrowables
     /// </summary>
     public partial class HistoricalLevellingSystem : GameSystemBase
     {
+        private const int ProbeDetailLimit = 32;
+
         // Building levelling queues.
         private NativeQueue<Entity> _levelupQueue;
         private NativeQueue<Entity> _leveldownQueue;
+        private NativeQueue<ProbeRecord> _probeQueue;
 
         // System references.
         private SimulationSystem _simulationSystem;
@@ -73,6 +77,75 @@ namespace PlopTheGrowables
         /// </summary>
         public bool IgnoreHouseholdCount { get; set; } = false;
 
+        private enum ProbeDirection : byte
+        {
+            Levelup = 1,
+            Leveldown = 2,
+        }
+
+        private enum ProbeDecisionKind : byte
+        {
+            Dequeued = 1,
+            Skip = 2,
+            Success = 3,
+        }
+
+        private enum ProbeReason : byte
+        {
+            None = 0,
+            LevelLocked = 1,
+            NotSpawnable = 2,
+            ZoneDisabled = 3,
+            SelectSpawnableFailed = 4,
+            DisableLevellingGlobal = 5,
+            DisableAbandonmentGlobal = 6,
+            Other = 7,
+        }
+
+        private enum ProbeAreaClass : byte
+        {
+            Unknown = 0,
+            Residential = 1,
+            Commercial = 2,
+            Industrial = 3,
+            Office = 4,
+        }
+
+        private struct ProbeRecord
+        {
+            public ProbeDirection m_Direction;
+            public ProbeDecisionKind m_DecisionKind;
+            public ProbeReason m_Reason;
+            public ProbeAreaClass m_AreaClass;
+            public Entity m_Building;
+            public Entity m_CurrentPrefab;
+            public Entity m_SelectedNextPrefab;
+            public int m_CurrentLevel;
+            public byte m_Spawned;
+            public byte m_Plopped;
+            public byte m_Signature;
+            public byte m_LevelLocked;
+            public byte m_PropertyOnMarket;
+            public byte m_PropertyToBeOnMarket;
+            public byte m_UnderConstruction;
+            public byte m_SelectFailedNoCandidate;
+            public byte m_IsDetail;
+            public int m_RenterCount;
+        }
+
+        private struct ProbeCounters
+        {
+            public int m_Processed;
+            public int m_Success;
+            public int m_LevelLocked;
+            public int m_NotSpawnable;
+            public int m_ZoneDisabled;
+            public int m_SelectSpawnableFailed;
+            public int m_DisableLevellingGlobal;
+            public int m_DisableAbandonmentGlobal;
+            public int m_Other;
+        }
+
         /// <summary>
         /// Updates the active level up and level down queues to the provided values.
         /// </summary>
@@ -105,6 +178,7 @@ namespace PlopTheGrowables
             _buildingPrefabGroupQuery = GetEntityQuery(ComponentType.ReadOnly<BuildingData>(), ComponentType.ReadOnly<BuildingSpawnGroupData>(), ComponentType.ReadOnly<PrefabData>());
             _buildingSettingsQuery = GetEntityQuery(ComponentType.ReadOnly<BuildingConfigurationData>());
             _endFrameBarrier = World.GetOrCreateSystemManaged<EndFrameBarrier>();
+            _probeQueue = new NativeQueue<ProbeRecord>(Allocator.Persistent);
             RequireForUpdate(_buildingSettingsQuery);
 
             // Reflect level up queue.
@@ -142,21 +216,38 @@ namespace PlopTheGrowables
         /// </summary>
         protected override void OnUpdate()
         {
-            // Clear queues if levelling is disabled.
-            if (DisableLevelling)
+            int levelupQueueCount = _levelupQueue.Count;
+            int leveldownQueueCount = _leveldownQueue.Count;
+            bool hasLevelupWork = levelupQueueCount != 0;
+            bool hasLeveldownWork = leveldownQueueCount != 0;
+            if (!hasLevelupWork && !hasLeveldownWork)
             {
-                _levelupQueue.Clear();
-                _leveldownQueue.Clear();
-
-                // Don't need to do anything else.
                 return;
             }
 
-            // Upgrade any buildings.
-            if (_levelupQueue.Count != 0)
+            ClearProbeQueue();
+
+            if (DisableLevelling)
+            {
+                ProbeCounters levelupCounters = default;
+                ProbeCounters leveldownCounters = default;
+                levelupCounters.m_Processed = levelupQueueCount;
+                levelupCounters.m_DisableLevellingGlobal = levelupQueueCount;
+                leveldownCounters.m_Processed = leveldownQueueCount;
+                leveldownCounters.m_DisableLevellingGlobal = leveldownQueueCount;
+                LogHistoricalSummary(_simulationSystem.frameIndex, levelupQueueCount, leveldownQueueCount, levelupCounters, leveldownCounters);
+                _levelupQueue.Clear();
+                _leveldownQueue.Clear();
+                return;
+            }
+
+            bool scheduledWork = false;
+
+            if (hasLevelupWork)
             {
                 LevelupJob levelupJob = default;
                 levelupJob.m_IgnoreHouseholdCount = IgnoreHouseholdCount;
+                levelupJob.m_ProbeDetailLimit = ProbeDetailLimit;
                 levelupJob.m_LevelLockedData = SystemAPI.GetComponentLookup<LevelLocked>(true);
                 levelupJob.m_EntityType = SystemAPI.GetEntityTypeHandle();
                 levelupJob.m_SpawnableBuildingType = SystemAPI.GetComponentTypeHandle<SpawnableBuildingData>(true);
@@ -174,6 +265,13 @@ namespace PlopTheGrowables
                 levelupJob.m_BuildingPropertyDatas = SystemAPI.GetComponentLookup<BuildingPropertyData>(true);
                 levelupJob.m_OfficeBuilding = SystemAPI.GetComponentLookup<OfficeBuilding>(true);
                 levelupJob.m_ZoneData = SystemAPI.GetComponentLookup<ZoneData>(true);
+                levelupJob.m_SpawnedBuildings = SystemAPI.GetComponentLookup<SpawnedBuilding>(true);
+                levelupJob.m_PloppedBuildings = SystemAPI.GetComponentLookup<PloppedBuilding>(true);
+                levelupJob.m_SignatureBuildings = SystemAPI.GetComponentLookup<Signature>(true);
+                levelupJob.m_PropertyOnMarket = SystemAPI.GetComponentLookup<PropertyOnMarket>(true);
+                levelupJob.m_PropertyToBeOnMarket = SystemAPI.GetComponentLookup<PropertyToBeOnMarket>(true);
+                levelupJob.m_UnderConstructionData = SystemAPI.GetComponentLookup<UnderConstruction>(true);
+                levelupJob.m_Renters = SystemAPI.GetBufferLookup<Renter>(true);
                 levelupJob.m_Cells = SystemAPI.GetBufferLookup<Cell>(true);
                 levelupJob.m_BuildingConfigurationData = _buildingSettingsQuery.GetSingleton<BuildingConfigurationData>();
                 levelupJob.m_SpawnableBuildingChunks = _buildingPrefabGroupQuery.ToArchetypeChunkListAsync(World.UpdateAllocator.ToAllocator, out _);
@@ -181,6 +279,7 @@ namespace PlopTheGrowables
                 levelupJob.m_RandomSeed = RandomSeed.Next();
                 levelupJob.m_IconCommandBuffer = _iconCommandSystem.CreateCommandBuffer();
                 levelupJob.m_LevelupQueue = _levelupQueue;
+                levelupJob.m_ProbeQueue = _probeQueue;
                 levelupJob.m_CommandBuffer = _endFrameBarrier.CreateCommandBuffer();
                 levelupJob.m_TriggerBuffer = _triggerSystem.CreateActionBuffer();
                 levelupJob.m_ZoneBuiltLevelQueue = _zoneBuiltRequirementSystem.GetZoneBuiltLevelQueue(out _);
@@ -190,45 +289,49 @@ namespace PlopTheGrowables
                 _endFrameBarrier.AddJobHandleForProducer(jobHandle);
                 _triggerSystem.AddActionBufferWriter(jobHandle);
                 Dependency = jobHandle;
+                scheduledWork = true;
             }
 
-            // Downgrade any buildings.
-            if (_leveldownQueue.Count != 0)
+            if (hasLeveldownWork)
             {
-                {
-                    LeveldownJob leveldownJob = default;
-                    leveldownJob.m_DisableAbandonment = DisableAbandonment;
-                    leveldownJob.m_LevelLockedData = SystemAPI.GetComponentLookup<LevelLocked>(true);
-                    leveldownJob.m_BuildingDatas = __TypeHandle.__Game_Prefabs_BuildingData_RO_ComponentLookup;
-                    leveldownJob.m_Prefabs = __TypeHandle.__Game_Prefabs_PrefabRef_RO_ComponentLookup;
-                    leveldownJob.m_SpawnableBuildings = SystemAPI.GetComponentLookup<SpawnableBuildingData>(true);
-                    leveldownJob.m_Buildings = SystemAPI.GetComponentLookup<Building>(false);
-                    leveldownJob.m_ElectricityConsumers = SystemAPI.GetComponentLookup<ElectricityConsumer>(true);
-                    leveldownJob.m_GarbageProducers = SystemAPI.GetComponentLookup<GarbageProducer>(true);
-                    leveldownJob.m_MailProducers = SystemAPI.GetComponentLookup<MailProducer>(true);
-                    leveldownJob.m_WaterConsumers = SystemAPI.GetComponentLookup<WaterConsumer>(true);
-                    leveldownJob.m_BuildingPropertyDatas = __TypeHandle.__Game_Prefabs_BuildingPropertyData_RO_ComponentLookup;
-                    leveldownJob.m_OfficeBuilding = __TypeHandle.__Game_Prefabs_OfficeBuilding_RO_ComponentLookup;
-                    leveldownJob.m_TriggerBuffer = _triggerSystem.CreateActionBuffer();
-                    leveldownJob.m_CrimeProducers = SystemAPI.GetComponentLookup<CrimeProducer>(false);
-                    leveldownJob.m_Renters = SystemAPI.GetBufferLookup<Renter>(false);
-                    leveldownJob.m_BuildingConfigurationData = _buildingSettingsQuery.GetSingleton<BuildingConfigurationData>();
-                    leveldownJob.m_LeveldownQueue = _leveldownQueue;
-                    leveldownJob.m_CommandBuffer = _endFrameBarrier.CreateCommandBuffer();
-                    leveldownJob.m_UpdatedElectricityRoadEdges = _electricityRoadConnectionGraphSystem.GetEdgeUpdateQueue(out _);
-                    leveldownJob.m_UpdatedWaterPipeRoadEdges = _waterPipeRoadConnectionGraphSystem.GetEdgeUpdateQueue(out _);
-                    leveldownJob.m_IconCommandBuffer = _iconCommandSystem.CreateCommandBuffer();
-                    leveldownJob.m_SimulationFrame = _simulationSystem.frameIndex;
-                    JobHandle jobHandle = IJobExtensions.Schedule(leveldownJob, Dependency);
-                    _endFrameBarrier.AddJobHandleForProducer(jobHandle);
-                    _electricityRoadConnectionGraphSystem.AddQueueWriter(jobHandle);
-                    _iconCommandSystem.AddCommandBufferWriter(jobHandle);
-                    _triggerSystem.AddActionBufferWriter(jobHandle);
-                    Dependency = jobHandle;
-                }
+                LeveldownJob leveldownJob = default;
+                leveldownJob.m_DisableAbandonment = DisableAbandonment;
+                leveldownJob.m_LevelLockedData = SystemAPI.GetComponentLookup<LevelLocked>(true);
+                leveldownJob.m_BuildingDatas = __TypeHandle.__Game_Prefabs_BuildingData_RO_ComponentLookup;
+                leveldownJob.m_Prefabs = __TypeHandle.__Game_Prefabs_PrefabRef_RO_ComponentLookup;
+                leveldownJob.m_SpawnableBuildings = SystemAPI.GetComponentLookup<SpawnableBuildingData>(true);
+                leveldownJob.m_Buildings = SystemAPI.GetComponentLookup<Building>(false);
+                leveldownJob.m_ElectricityConsumers = SystemAPI.GetComponentLookup<ElectricityConsumer>(true);
+                leveldownJob.m_GarbageProducers = SystemAPI.GetComponentLookup<GarbageProducer>(true);
+                leveldownJob.m_MailProducers = SystemAPI.GetComponentLookup<MailProducer>(true);
+                leveldownJob.m_WaterConsumers = SystemAPI.GetComponentLookup<WaterConsumer>(true);
+                leveldownJob.m_BuildingPropertyDatas = __TypeHandle.__Game_Prefabs_BuildingPropertyData_RO_ComponentLookup;
+                leveldownJob.m_OfficeBuilding = __TypeHandle.__Game_Prefabs_OfficeBuilding_RO_ComponentLookup;
+                leveldownJob.m_TriggerBuffer = _triggerSystem.CreateActionBuffer();
+                leveldownJob.m_CrimeProducers = SystemAPI.GetComponentLookup<CrimeProducer>(false);
+                leveldownJob.m_Renters = SystemAPI.GetBufferLookup<Renter>(false);
+                leveldownJob.m_BuildingConfigurationData = _buildingSettingsQuery.GetSingleton<BuildingConfigurationData>();
+                leveldownJob.m_LeveldownQueue = _leveldownQueue;
+                leveldownJob.m_ProbeQueue = _probeQueue;
+                leveldownJob.m_CommandBuffer = _endFrameBarrier.CreateCommandBuffer();
+                leveldownJob.m_UpdatedElectricityRoadEdges = _electricityRoadConnectionGraphSystem.GetEdgeUpdateQueue(out _);
+                leveldownJob.m_UpdatedWaterPipeRoadEdges = _waterPipeRoadConnectionGraphSystem.GetEdgeUpdateQueue(out _);
+                leveldownJob.m_IconCommandBuffer = _iconCommandSystem.CreateCommandBuffer();
+                leveldownJob.m_SimulationFrame = _simulationSystem.frameIndex;
+                JobHandle jobHandle = IJobExtensions.Schedule(leveldownJob, Dependency);
+                _endFrameBarrier.AddJobHandleForProducer(jobHandle);
+                _electricityRoadConnectionGraphSystem.AddQueueWriter(jobHandle);
+                _iconCommandSystem.AddCommandBufferWriter(jobHandle);
+                _triggerSystem.AddActionBufferWriter(jobHandle);
+                Dependency = jobHandle;
+                scheduledWork = true;
             }
 
-            return;
+            if (scheduledWork)
+            {
+                Dependency.Complete();
+                LogHistoricalProbeRecords(_simulationSystem.frameIndex, levelupQueueCount, leveldownQueueCount);
+            }
         }
 
         /// <summary>
@@ -239,6 +342,11 @@ namespace PlopTheGrowables
             Instance = null;
 
             // The level up and level down queues belong to PropertyRenterSystem, so we don't dispose of them here.
+            if (_probeQueue.IsCreated)
+            {
+                _probeQueue.Dispose();
+            }
+
             base.OnDestroy();
         }
 
@@ -251,6 +359,8 @@ namespace PlopTheGrowables
         {
             [ReadOnly]
             public bool m_IgnoreHouseholdCount;
+            [ReadOnly]
+            public int m_ProbeDetailLimit;
             [ReadOnly]
             public ComponentLookup<LevelLocked> m_LevelLockedData;
             [ReadOnly]
@@ -286,6 +396,20 @@ namespace PlopTheGrowables
             [ReadOnly]
             public ComponentLookup<ZoneData> m_ZoneData;
             [ReadOnly]
+            public ComponentLookup<SpawnedBuilding> m_SpawnedBuildings;
+            [ReadOnly]
+            public ComponentLookup<PloppedBuilding> m_PloppedBuildings;
+            [ReadOnly]
+            public ComponentLookup<Signature> m_SignatureBuildings;
+            [ReadOnly]
+            public ComponentLookup<PropertyOnMarket> m_PropertyOnMarket;
+            [ReadOnly]
+            public ComponentLookup<PropertyToBeOnMarket> m_PropertyToBeOnMarket;
+            [ReadOnly]
+            public ComponentLookup<UnderConstruction> m_UnderConstructionData;
+            [ReadOnly]
+            public BufferLookup<Renter> m_Renters;
+            [ReadOnly]
             public BufferLookup<Cell> m_Cells;
             public BuildingConfigurationData m_BuildingConfigurationData;
             [ReadOnly]
@@ -296,6 +420,7 @@ namespace PlopTheGrowables
             public RandomSeed m_RandomSeed;
             public IconCommandBuffer m_IconCommandBuffer;
             public NativeQueue<Entity> m_LevelupQueue;
+            public NativeQueue<ProbeRecord> m_ProbeQueue;
             public EntityCommandBuffer m_CommandBuffer;
             public NativeQueue<TriggerAction> m_TriggerBuffer;
             public NativeQueue<ZoneBuiltLevelUpdate> m_ZoneBuiltLevelQueue;
@@ -306,23 +431,42 @@ namespace PlopTheGrowables
             public void Execute()
             {
                 Random random = m_RandomSeed.GetRandom(0);
+                int detailCount = 0;
                 while (m_LevelupQueue.TryDequeue(out Entity item))
                 {
+                    bool isDetail = detailCount < m_ProbeDetailLimit;
+                    ProbeRecord probeRecord = CreateProbeRecord(item, isDetail);
                     Entity prefab = m_Prefabs[item].m_Prefab;
+                    probeRecord.m_CurrentPrefab = prefab;
+                    if (isDetail)
+                    {
+                        detailCount++;
+                    }
+
                     if (!m_SpawnableBuildings.HasComponent(prefab))
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.NotSpawnable;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
 
-                    // Exempt level-locked buildings.
                     if (m_LevelLockedData.HasComponent(item))
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.LevelLocked;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
 
                     SpawnableBuildingData spawnableBuildingData = m_SpawnableBuildings[prefab];
+                    probeRecord.m_CurrentLevel = spawnableBuildingData.m_Level;
+                    probeRecord.m_AreaClass = GetAreaClass(m_BuildingPropertyDatas[prefab], prefab);
                     if (!m_PrefabDatas.IsComponentEnabled(spawnableBuildingData.m_ZonePrefab))
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.ZoneDisabled;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
 
@@ -334,8 +478,16 @@ namespace PlopTheGrowables
 
                     if (entity == Entity.Null)
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.SelectSpawnableFailed;
+                        probeRecord.m_SelectFailedNoCandidate = 1;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
+
+                    probeRecord.m_DecisionKind = ProbeDecisionKind.Success;
+                    probeRecord.m_SelectedNextPrefab = entity;
+                    m_ProbeQueue.Enqueue(probeRecord);
 
                     m_CommandBuffer.AddComponent(item, new UnderConstruction
                     {
@@ -375,6 +527,52 @@ namespace PlopTheGrowables
 
                     m_IconCommandBuffer.Add(item, m_BuildingConfigurationData.m_LevelUpNotification, IconPriority.Info, IconClusterLayer.Transaction);
                 }
+            }
+
+            private ProbeRecord CreateProbeRecord(Entity building, bool isDetail)
+            {
+                ProbeRecord probeRecord = default;
+                probeRecord.m_Direction = ProbeDirection.Levelup;
+                probeRecord.m_DecisionKind = ProbeDecisionKind.Dequeued;
+                probeRecord.m_Reason = ProbeReason.None;
+                probeRecord.m_AreaClass = ProbeAreaClass.Unknown;
+                probeRecord.m_Building = building;
+                probeRecord.m_CurrentPrefab = m_Prefabs[building].m_Prefab;
+                probeRecord.m_IsDetail = (byte)(isDetail ? 1 : 0);
+                if (!isDetail)
+                {
+                    return probeRecord;
+                }
+
+                probeRecord.m_Spawned = (byte)(m_SpawnedBuildings.HasComponent(building) ? 1 : 0);
+                probeRecord.m_Plopped = (byte)(m_PloppedBuildings.HasComponent(building) ? 1 : 0);
+                probeRecord.m_Signature = (byte)(m_SignatureBuildings.HasComponent(building) ? 1 : 0);
+                probeRecord.m_LevelLocked = (byte)(m_LevelLockedData.HasComponent(building) ? 1 : 0);
+                probeRecord.m_PropertyOnMarket = (byte)(m_PropertyOnMarket.HasComponent(building) ? 1 : 0);
+                probeRecord.m_PropertyToBeOnMarket = (byte)(m_PropertyToBeOnMarket.HasComponent(building) ? 1 : 0);
+                probeRecord.m_UnderConstruction = (byte)(m_UnderConstructionData.HasComponent(building) ? 1 : 0);
+                probeRecord.m_RenterCount = m_Renters.HasBuffer(building) ? m_Renters[building].Length : 0;
+                return probeRecord;
+            }
+
+            private ProbeAreaClass GetAreaClass(BuildingPropertyData buildingPropertyData, Entity prefab)
+            {
+                if (buildingPropertyData.CountProperties(AreaType.Residential) > 0)
+                {
+                    return ProbeAreaClass.Residential;
+                }
+
+                if (buildingPropertyData.CountProperties(AreaType.Commercial) > 0)
+                {
+                    return ProbeAreaClass.Commercial;
+                }
+
+                if (buildingPropertyData.CountProperties(AreaType.Industrial) > 0)
+                {
+                    return m_OfficeBuilding.HasComponent(prefab) ? ProbeAreaClass.Office : ProbeAreaClass.Industrial;
+                }
+
+                return ProbeAreaClass.Unknown;
             }
 
             /// <summary>
@@ -568,6 +766,7 @@ namespace PlopTheGrowables
             [ReadOnly]
             public BuildingConfigurationData m_BuildingConfigurationData;
             public NativeQueue<Entity> m_LeveldownQueue;
+            public NativeQueue<ProbeRecord> m_ProbeQueue;
             public EntityCommandBuffer m_CommandBuffer;
             public NativeQueue<Entity> m_UpdatedElectricityRoadEdges;
             public NativeQueue<Entity> m_UpdatedWaterPipeRoadEdges;
@@ -581,22 +780,49 @@ namespace PlopTheGrowables
             {
                 while (m_LeveldownQueue.TryDequeue(out Entity item))
                 {
+                    ProbeRecord probeRecord = default;
+                    probeRecord.m_Direction = ProbeDirection.Leveldown;
+                    probeRecord.m_DecisionKind = ProbeDecisionKind.Dequeued;
+                    probeRecord.m_Reason = ProbeReason.None;
+                    probeRecord.m_Building = item;
+                    probeRecord.m_CurrentPrefab = m_Prefabs.HasComponent(item) ? m_Prefabs[item].m_Prefab : Entity.Null;
+
                     if (!m_Prefabs.HasComponent(item))
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.Other;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
 
-                    // Exempt level-locked buildings, or any buildings if abandonment is disabled.
-                    if (m_DisableAbandonment || m_LevelLockedData.HasComponent(item))
+                    if (m_DisableAbandonment)
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.DisableAbandonmentGlobal;
+                        m_ProbeQueue.Enqueue(probeRecord);
+                        continue;
+                    }
+
+                    if (m_LevelLockedData.HasComponent(item))
+                    {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.LevelLocked;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
 
                     Entity prefab = m_Prefabs[item].m_Prefab;
+                    probeRecord.m_CurrentPrefab = prefab;
                     if (!m_SpawnableBuildings.HasComponent(prefab))
                     {
+                        probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
+                        probeRecord.m_Reason = ProbeReason.NotSpawnable;
+                        m_ProbeQueue.Enqueue(probeRecord);
                         continue;
                     }
+
+                    probeRecord.m_DecisionKind = ProbeDecisionKind.Success;
+                    m_ProbeQueue.Enqueue(probeRecord);
 
                     BuildingPropertyData buildingPropertyData = m_BuildingPropertyDatas[prefab];
                     m_CommandBuffer.AddComponent(item, new Abandoned
@@ -685,5 +911,126 @@ namespace PlopTheGrowables
                 }
             }
         }
+
+        private void ClearProbeQueue()
+        {
+            while (_probeQueue.TryDequeue(out _))
+            {
+            }
+        }
+
+        private void LogHistoricalProbeRecords(uint frame, int levelupQueueCount, int leveldownQueueCount)
+        {
+            ProbeCounters levelupCounters = default;
+            ProbeCounters leveldownCounters = default;
+            List<ProbeRecord> detailRecords = new (ProbeDetailLimit);
+
+            while (_probeQueue.TryDequeue(out ProbeRecord record))
+            {
+                if (record.m_Direction == ProbeDirection.Levelup)
+                {
+                    AccumulateRecord(ref levelupCounters, record);
+                    if (record.m_IsDetail != 0 && detailRecords.Count < ProbeDetailLimit)
+                    {
+                        detailRecords.Add(record);
+                    }
+                }
+                else
+                {
+                    AccumulateRecord(ref leveldownCounters, record);
+                }
+            }
+
+            LogHistoricalSummary(frame, levelupQueueCount, leveldownQueueCount, levelupCounters, leveldownCounters);
+            foreach (ProbeRecord detailRecord in detailRecords)
+            {
+                LogHistoricalDetail(detailRecord);
+            }
+        }
+
+        private void LogHistoricalSummary(uint frame, int levelupQueueCount, int leveldownQueueCount, ProbeCounters levelupCounters, ProbeCounters leveldownCounters)
+        {
+            Mod.Instance.Log.Info(CompatibilityProbeLog.Format("summary", $"system=HistoricalLevellingSystem, frame={frame}, levelup_queue={levelupQueueCount}, leveldown_queue={leveldownQueueCount}, levelup_processed={levelupCounters.m_Processed}, levelup_success={levelupCounters.m_Success}, levelup_skip_level_locked={levelupCounters.m_LevelLocked}, levelup_skip_not_spawnable={levelupCounters.m_NotSpawnable}, levelup_skip_zone_disabled={levelupCounters.m_ZoneDisabled}, levelup_skip_select_spawnable_failed={levelupCounters.m_SelectSpawnableFailed}, levelup_skip_disable_levelling_global={levelupCounters.m_DisableLevellingGlobal}, levelup_skip_other={levelupCounters.m_Other}, leveldown_processed={leveldownCounters.m_Processed}, leveldown_success={leveldownCounters.m_Success}, leveldown_skip_level_locked={leveldownCounters.m_LevelLocked}, leveldown_skip_not_spawnable={leveldownCounters.m_NotSpawnable}, leveldown_skip_disable_levelling_global={leveldownCounters.m_DisableLevellingGlobal}, leveldown_skip_disable_abandonment_global={leveldownCounters.m_DisableAbandonmentGlobal}, leveldown_skip_other={leveldownCounters.m_Other})"));
+        }
+
+        private void LogHistoricalDetail(ProbeRecord record)
+        {
+            Mod.Instance.Log.Info(CompatibilityProbeLog.Format("detail", $"system=HistoricalLevellingSystem, decision={GetDecisionLabel(record.m_DecisionKind)}, skip_reason={GetReasonLabel(record.m_Reason)}, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, spawned={FormatBool(record.m_Spawned)}, plopped={FormatBool(record.m_Plopped)}, signature={FormatBool(record.m_Signature)}, level_locked={FormatBool(record.m_LevelLocked)}, property_on_market={FormatBool(record.m_PropertyOnMarket)}, property_to_be_on_market={FormatBool(record.m_PropertyToBeOnMarket)}, under_construction={FormatBool(record.m_UnderConstruction)}, renter_count={record.m_RenterCount}, selected_next_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectedNextPrefab)}, select_failed_no_candidate={FormatBool(record.m_SelectFailedNoCandidate)})"));
+        }
+
+        private static void AccumulateRecord(ref ProbeCounters counters, ProbeRecord record)
+        {
+            counters.m_Processed++;
+            if (record.m_DecisionKind == ProbeDecisionKind.Success)
+            {
+                counters.m_Success++;
+                return;
+            }
+
+            switch (record.m_Reason)
+            {
+                case ProbeReason.LevelLocked:
+                    counters.m_LevelLocked++;
+                    break;
+                case ProbeReason.NotSpawnable:
+                    counters.m_NotSpawnable++;
+                    break;
+                case ProbeReason.ZoneDisabled:
+                    counters.m_ZoneDisabled++;
+                    break;
+                case ProbeReason.SelectSpawnableFailed:
+                    counters.m_SelectSpawnableFailed++;
+                    break;
+                case ProbeReason.DisableLevellingGlobal:
+                    counters.m_DisableLevellingGlobal++;
+                    break;
+                case ProbeReason.DisableAbandonmentGlobal:
+                    counters.m_DisableAbandonmentGlobal++;
+                    break;
+                case ProbeReason.Other:
+                    counters.m_Other++;
+                    break;
+            }
+        }
+
+        private static string GetAreaClassLabel(ProbeAreaClass areaClass)
+        {
+            return areaClass switch
+            {
+                ProbeAreaClass.Residential => "residential",
+                ProbeAreaClass.Commercial => "commercial",
+                ProbeAreaClass.Industrial => "industrial",
+                ProbeAreaClass.Office => "office",
+                _ => "unknown",
+            };
+        }
+
+        private static string GetDecisionLabel(ProbeDecisionKind decisionKind)
+        {
+            return decisionKind switch
+            {
+                ProbeDecisionKind.Dequeued => "dequeued",
+                ProbeDecisionKind.Skip => "skip",
+                ProbeDecisionKind.Success => "success",
+                _ => "dequeued",
+            };
+        }
+
+        private static string GetReasonLabel(ProbeReason reason)
+        {
+            return reason switch
+            {
+                ProbeReason.LevelLocked => "level_locked",
+                ProbeReason.NotSpawnable => "not_spawnable",
+                ProbeReason.ZoneDisabled => "zone_disabled",
+                ProbeReason.SelectSpawnableFailed => "select_spawnable_failed",
+                ProbeReason.DisableLevellingGlobal => "disable_levelling_global",
+                ProbeReason.DisableAbandonmentGlobal => "disable_abandonment_global",
+                ProbeReason.Other => "other",
+                _ => "none",
+            };
+        }
+
+        private static string FormatBool(byte value) => value == 0 ? "false" : "true";
     }
 }
