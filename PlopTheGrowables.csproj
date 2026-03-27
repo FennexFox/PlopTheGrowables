@@ -12,8 +12,13 @@
 		<GenerateDocumentationFile>True</GenerateDocumentationFile>
 		<TargetFrameworks>net48</TargetFrameworks>
 		<LangVersion>9.0</LangVersion>
-		<Configurations>Debug;Release</Configurations>
+		<Configurations>Debug;Release;InvestigationNoCustomSystem</Configurations>
 		<PublishConfigurationPath>Properties\PublishConfiguration.xml</PublishConfigurationPath>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)' == 'InvestigationNoCustomSystem'">
+		<DefineConstants>$(DefineConstants);TRACE;PTG_NO_CUSTOM_SYSTEM</DefineConstants>
+		<InformationalVersion>$(Version)+investigation.no-custom-system</InformationalVersion>
 	</PropertyGroup>
 
 	<Import Project="Config/References.csproj" />

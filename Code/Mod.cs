@@ -55,10 +55,25 @@ namespace PlopTheGrowables
             Log.Info("setting logging level to Debug");
             Log.effectivenessLevel = Level.Debug;
 #endif
+#if PTG_NO_CUSTOM_SYSTEM
+            string investigationVariant = "no_custom_system";
+            string historicalLevellingEnabled = CompatibilityProbeLog.FormatBool(false);
+            string buildingUpkeepPatchEnabled = CompatibilityProbeLog.FormatBool(false);
+#else
+            string investigationVariant = "default";
+            string historicalLevellingEnabled = CompatibilityProbeLog.FormatBool(true);
+            string buildingUpkeepPatchEnabled = CompatibilityProbeLog.FormatBool(true);
+#endif
             Log.Info($"loading {ModName} version {Assembly.GetExecutingAssembly().GetName().Version}");
+            Log.Info(CompatibilityProbeLog.Format("summary", $"system=Mod, event=startup_variant, investigation_variant={investigationVariant}, historical_levelling_enabled={historicalLevellingEnabled}, building_upkeep_patch_enabled={buildingUpkeepPatchEnabled}"));
 
             // Apply harmony patches.
+#if PTG_NO_CUSTOM_SYSTEM
+            Log.Info("Skipping BuildingUpkeepSystem Harmony patch for investigation build.");
+            Log.Info(CompatibilityProbeLog.Format("summary", "system=Mod, event=investigation_warning, detail=levelling_locking_options_visible_but_out_of_scope_for_no_custom_system_variant"));
+#else
             new Patcher("algernon-PlopTheGrowables", Log);
+#endif
 
             // Activate UI system.
             updateSystem.UpdateAt<PlopTheGrowablesUISystem>(SystemUpdatePhase.UIUpdate);
@@ -78,7 +93,11 @@ namespace PlopTheGrowables
             updateSystem.World.GetOrCreateSystemManaged<ZoneCheckSystem>().Enabled = false;
 
             // Activate custom levelling system, running immediately after the system where levelling is normally handled.
+#if PTG_NO_CUSTOM_SYSTEM
+            Log.Info("Skipping HistoricalLevellingSystem registration for investigation build.");
+#else
             updateSystem.UpdateAfter<HistoricalLevellingSystem, BuildingUpkeepSystem>(SystemUpdatePhase.GameSimulation);
+#endif
 
             // Activate tagging systems.
             updateSystem.UpdateAfter<ExistingBuildingSystem>(SystemUpdatePhase.Deserialize);
@@ -93,8 +112,12 @@ namespace PlopTheGrowables
             {
                 if (modInfo.asset.name.Equals("RWH"))
                 {
+#if PTG_NO_CUSTOM_SYSTEM
+                    Log.Info("Found Realistic Workplaces and Housholds mod, but HistoricalLevellingSystem is disabled for this investigation build.");
+#else
                     Log.Info("Found Realistic Workplaces and Housholds mod; deactivating game workplace check in building level up job.");
                     updateSystem.World.GetOrCreateSystemManaged<HistoricalLevellingSystem>().IgnoreHouseholdCount = true;
+#endif
                 }
             }
         }
