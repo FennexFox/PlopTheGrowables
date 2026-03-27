@@ -7,6 +7,7 @@
 namespace PlopTheGrowables
 {
     using System.Collections.Generic;
+    using System.Globalization;
     using System.Reflection;
     using Colossal.Collections;
     using Colossal.Mathematics;
@@ -111,16 +112,70 @@ namespace PlopTheGrowables
             Office = 4,
         }
 
+        private enum ProbeCandidateFilterStage : byte
+        {
+            None = 0,
+            ZoneMatch = 1,
+            LevelMatch = 2,
+            LotMatch = 3,
+            HeightMatch = 4,
+            AccessMatch = 5,
+            HouseholdOrPropertyMatch = 6,
+            AllowedManufacturedMatch = 7,
+            AllowedSoldMatch = 8,
+            AllowedStoredMatch = 9,
+        }
+
+        private struct ProbeCandidateSample
+        {
+            public Entity m_Prefab;
+            public int2 m_LotSize;
+            public float m_Height;
+            public BuildingFlags m_AccessFlags;
+            public ProbeCandidateFilterStage m_RejectStage;
+        }
+
+        private struct ProbeCandidateSamples
+        {
+            public byte m_Count;
+            public ProbeCandidateSample m_Sample1;
+            public ProbeCandidateSample m_Sample2;
+            public ProbeCandidateSample m_Sample3;
+        }
+
+        private struct SelectionTrace
+        {
+            public int m_CandidateCountZoneMatch;
+            public int m_CandidateCountLevelMatch;
+            public int m_CandidateCountLotMatch;
+            public int m_CandidateCountHeightMatch;
+            public int m_CandidateCountAccessMatch;
+            public int m_CandidateCountHouseholdOrPropertyMatch;
+            public int m_CandidateCountAllowedManufacturedMatch;
+            public int m_CandidateCountAllowedSoldMatch;
+            public int m_CandidateCountAllowedStoredMatch;
+            public ProbeCandidateSamples m_LevelRejectSamples;
+            public ProbeCandidateSamples m_LotRejectSamples;
+            public ProbeCandidateSamples m_HeightRejectSamples;
+            public ProbeCandidateSamples m_AccessRejectSamples;
+            public ProbeCandidateSamples m_HouseholdOrPropertyRejectSamples;
+            public ProbeCandidateSamples m_AllowedManufacturedRejectSamples;
+            public ProbeCandidateSamples m_AllowedSoldRejectSamples;
+            public ProbeCandidateSamples m_AllowedStoredRejectSamples;
+        }
+
         private struct ProbeRecord
         {
             public ProbeDirection m_Direction;
             public ProbeDecisionKind m_DecisionKind;
             public ProbeReason m_Reason;
             public ProbeAreaClass m_AreaClass;
+            public ProbeCandidateFilterStage m_CandidateZeroStage;
             public Entity m_Building;
             public Entity m_CurrentPrefab;
             public Entity m_SelectedNextPrefab;
             public int m_CurrentLevel;
+            public int m_TargetLevel;
             public byte m_Spawned;
             public byte m_Plopped;
             public byte m_Signature;
@@ -129,8 +184,26 @@ namespace PlopTheGrowables
             public byte m_PropertyToBeOnMarket;
             public byte m_UnderConstruction;
             public byte m_SelectFailedNoCandidate;
+            public byte m_HasSelectionBreakdown;
             public byte m_IsDetail;
             public int m_RenterCount;
+            public ZoneType m_ZoneType;
+            public int2 m_LotSize;
+            public float m_MaxHeight;
+            public BuildingFlags m_AccessFlags;
+            public int m_CandidateCountZoneMatch;
+            public int m_CandidateCountLevelMatch;
+            public int m_CandidateCountLotMatch;
+            public int m_CandidateCountHeightMatch;
+            public int m_CandidateCountAccessMatch;
+            public int m_CandidateCountHouseholdOrPropertyMatch;
+            public int m_CandidateCountAllowedManufacturedMatch;
+            public int m_CandidateCountAllowedSoldMatch;
+            public int m_CandidateCountAllowedStoredMatch;
+            public int m_CandidateCountFinal;
+            public ProbeCandidateSample m_SelectionSample1;
+            public ProbeCandidateSample m_SelectionSample2;
+            public ProbeCandidateSample m_SelectionSample3;
         }
 
         private struct ProbeCounters
@@ -474,7 +547,9 @@ namespace PlopTheGrowables
                     BuildingPropertyData buildingPropertyData = m_BuildingPropertyDatas[prefab];
                     ZoneData zoneData = m_ZoneData[spawnableBuildingData.m_ZonePrefab];
                     float maxHeight = GetMaxHeight(item, prefabBuildingData);
-                    Entity entity = SelectSpawnableBuilding(zoneData.m_ZoneType, spawnableBuildingData.m_Level + 1, prefabBuildingData.m_LotSize, maxHeight, prefabBuildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess), buildingPropertyData, ref random);
+                    int targetLevel = spawnableBuildingData.m_Level + 1;
+                    bool captureSelectionTrace = isDetail || IsPrioritySelectionProbe(probeRecord.m_AreaClass, targetLevel);
+                    Entity entity = SelectSpawnableBuilding(zoneData.m_ZoneType, targetLevel, prefabBuildingData.m_LotSize, maxHeight, prefabBuildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess), buildingPropertyData, captureSelectionTrace, ref probeRecord, ref random);
 
                     if (entity == Entity.Null)
                     {
@@ -536,8 +611,11 @@ namespace PlopTheGrowables
                 probeRecord.m_DecisionKind = ProbeDecisionKind.Dequeued;
                 probeRecord.m_Reason = ProbeReason.None;
                 probeRecord.m_AreaClass = ProbeAreaClass.Unknown;
+                probeRecord.m_CandidateZeroStage = ProbeCandidateFilterStage.None;
                 probeRecord.m_Building = building;
                 probeRecord.m_CurrentPrefab = m_Prefabs[building].m_Prefab;
+                probeRecord.m_TargetLevel = -1;
+                probeRecord.m_CandidateCountFinal = -1;
                 probeRecord.m_IsDetail = (byte)(isDetail ? 1 : 0);
                 if (!isDetail)
                 {
@@ -575,6 +653,8 @@ namespace PlopTheGrowables
                 return ProbeAreaClass.Unknown;
             }
 
+            private static bool IsPrioritySelectionProbe(ProbeAreaClass areaClass, int targetLevel) => areaClass == ProbeAreaClass.Office && targetLevel == 5;
+
             /// <summary>
             /// Selects a building to spawn.
             /// </summary>
@@ -584,12 +664,15 @@ namespace PlopTheGrowables
             /// <param name="maxHeight">Building maximum height.</param>
             /// <param name="accessFlags">Building access flags.</param>
             /// <param name="buildingPropertyData">Building property data.</param>
+            /// <param name="captureSelectionTrace">True to capture selection trace data.</param>
+            /// <param name="probeRecord">Probe record to update with trace data.</param>
             /// <param name="random">Random struct.</param>
             /// <returns>Selected building entity.</returns>
-            private Entity SelectSpawnableBuilding(ZoneType zoneType, int level, int2 lotSize, float maxHeight, BuildingFlags accessFlags, BuildingPropertyData buildingPropertyData, ref Random random)
+            private Entity SelectSpawnableBuilding(ZoneType zoneType, int level, int2 lotSize, float maxHeight, BuildingFlags accessFlags, BuildingPropertyData buildingPropertyData, bool captureSelectionTrace, ref ProbeRecord probeRecord, ref Random random)
             {
                 int num = 0;
                 Entity result = Entity.Null;
+                SelectionTrace selectionTrace = default;
                 for (int i = 0; i < m_SpawnableBuildingChunks.Length; i++)
                 {
                     ArchetypeChunk archetypeChunk = m_SpawnableBuildingChunks[i];
@@ -609,30 +692,282 @@ namespace PlopTheGrowables
                         BuildingData buildingData = nativeArray3[j];
                         BuildingPropertyData buildingPropertyData2 = nativeArray4[j];
                         ObjectGeometryData objectGeometryData = nativeArray5[j];
+                        BuildingFlags candidateAccessFlags = buildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess);
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountZoneMatch++;
+                        }
 
                         // Added toogle (m_IgnoreHouseholdCount) to check for buildingPropertyData.m_ResidentialProperties <= buildingPropertyData2.m_ResidentialProperties from here.
                         // This is to permit buildings to level up with more households than the previous building if the toggle is set, specifically making it compatible
                         // with the 'Realistic Households and Workplaces' mod.
-                        if (level == spawnableBuildingData.m_Level
-                            && lotSize.Equals(buildingData.m_LotSize)
-                            && objectGeometryData.m_Size.y <= maxHeight
-                            && (buildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess)) == accessFlags
-                            && (m_IgnoreHouseholdCount || (buildingPropertyData.m_ResidentialProperties <= buildingPropertyData2.m_ResidentialProperties))
-                            && buildingPropertyData.m_AllowedManufactured == buildingPropertyData2.m_AllowedManufactured
-                            && buildingPropertyData.m_AllowedSold == buildingPropertyData2.m_AllowedSold
-                            && buildingPropertyData.m_AllowedStored == buildingPropertyData2.m_AllowedStored)
+                        if (level != spawnableBuildingData.m_Level)
                         {
-                            int num2 = 100;
-                            num += num2;
-                            if (random.NextInt(num) < num2)
+                            if (captureSelectionTrace)
                             {
-                                result = nativeArray[j];
+                                CaptureRejectSample(ref selectionTrace.m_LevelRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.LevelMatch);
                             }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountLevelMatch++;
+                        }
+
+                        if (!lotSize.Equals(buildingData.m_LotSize))
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_LotRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.LotMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountLotMatch++;
+                        }
+
+                        if (objectGeometryData.m_Size.y > maxHeight)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_HeightRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.HeightMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountHeightMatch++;
+                        }
+
+                        if (candidateAccessFlags != accessFlags)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_AccessRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.AccessMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountAccessMatch++;
+                        }
+
+                        if (!m_IgnoreHouseholdCount && buildingPropertyData.m_ResidentialProperties > buildingPropertyData2.m_ResidentialProperties)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_HouseholdOrPropertyRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.HouseholdOrPropertyMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountHouseholdOrPropertyMatch++;
+                        }
+
+                        if (buildingPropertyData.m_AllowedManufactured != buildingPropertyData2.m_AllowedManufactured)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_AllowedManufacturedRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.AllowedManufacturedMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountAllowedManufacturedMatch++;
+                        }
+
+                        if (buildingPropertyData.m_AllowedSold != buildingPropertyData2.m_AllowedSold)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_AllowedSoldRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.AllowedSoldMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountAllowedSoldMatch++;
+                        }
+
+                        if (buildingPropertyData.m_AllowedStored != buildingPropertyData2.m_AllowedStored)
+                        {
+                            if (captureSelectionTrace)
+                            {
+                                CaptureRejectSample(ref selectionTrace.m_AllowedStoredRejectSamples, nativeArray[j], objectGeometryData, buildingData, ProbeCandidateFilterStage.AllowedStoredMatch);
+                            }
+
+                            continue;
+                        }
+
+                        if (captureSelectionTrace)
+                        {
+                            selectionTrace.m_CandidateCountAllowedStoredMatch++;
+                        }
+
+                        int num2 = 100;
+                        num += num2;
+                        if (random.NextInt(num) < num2)
+                        {
+                            result = nativeArray[j];
                         }
                     }
                 }
 
+                if (captureSelectionTrace)
+                {
+                    ApplySelectionTrace(ref probeRecord, zoneType, level, lotSize, maxHeight, accessFlags, ref selectionTrace, result == Entity.Null);
+                }
+
                 return result;
+            }
+
+            private static void CaptureRejectSample(ref ProbeCandidateSamples samples, Entity prefab, ObjectGeometryData objectGeometryData, BuildingData buildingData, ProbeCandidateFilterStage rejectStage)
+            {
+                if (samples.m_Count >= 3)
+                {
+                    return;
+                }
+
+                ProbeCandidateSample sample = default;
+                sample.m_Prefab = prefab;
+                sample.m_Height = objectGeometryData.m_Size.y;
+                sample.m_LotSize = buildingData.m_LotSize;
+                sample.m_AccessFlags = buildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess);
+                sample.m_RejectStage = rejectStage;
+
+                switch (samples.m_Count)
+                {
+                    case 0:
+                        samples.m_Sample1 = sample;
+                        break;
+                    case 1:
+                        samples.m_Sample2 = sample;
+                        break;
+                    default:
+                        samples.m_Sample3 = sample;
+                        break;
+                }
+
+                samples.m_Count++;
+            }
+
+            private static void ApplySelectionTrace(ref ProbeRecord probeRecord, ZoneType zoneType, int level, int2 lotSize, float maxHeight, BuildingFlags accessFlags, ref SelectionTrace selectionTrace, bool selectionFailed)
+            {
+                probeRecord.m_ZoneType = zoneType;
+                probeRecord.m_TargetLevel = level;
+                probeRecord.m_LotSize = lotSize;
+                probeRecord.m_MaxHeight = maxHeight;
+                probeRecord.m_AccessFlags = accessFlags;
+                probeRecord.m_CandidateCountZoneMatch = selectionTrace.m_CandidateCountZoneMatch;
+                probeRecord.m_CandidateCountLevelMatch = selectionTrace.m_CandidateCountLevelMatch;
+                probeRecord.m_CandidateCountLotMatch = selectionTrace.m_CandidateCountLotMatch;
+                probeRecord.m_CandidateCountHeightMatch = selectionTrace.m_CandidateCountHeightMatch;
+                probeRecord.m_CandidateCountAccessMatch = selectionTrace.m_CandidateCountAccessMatch;
+                probeRecord.m_CandidateCountHouseholdOrPropertyMatch = selectionTrace.m_CandidateCountHouseholdOrPropertyMatch;
+                probeRecord.m_CandidateCountAllowedManufacturedMatch = selectionTrace.m_CandidateCountAllowedManufacturedMatch;
+                probeRecord.m_CandidateCountAllowedSoldMatch = selectionTrace.m_CandidateCountAllowedSoldMatch;
+                probeRecord.m_CandidateCountAllowedStoredMatch = selectionTrace.m_CandidateCountAllowedStoredMatch;
+                probeRecord.m_CandidateCountFinal = selectionTrace.m_CandidateCountAllowedStoredMatch;
+
+                if (!selectionFailed)
+                {
+                    return;
+                }
+
+                probeRecord.m_HasSelectionBreakdown = 1;
+                probeRecord.m_CandidateZeroStage = DetermineCandidateZeroStage(selectionTrace);
+                CopySelectionSamples(ref probeRecord, GetRejectSamples(selectionTrace, probeRecord.m_CandidateZeroStage));
+            }
+
+            private static ProbeCandidateFilterStage DetermineCandidateZeroStage(SelectionTrace selectionTrace)
+            {
+                if (selectionTrace.m_CandidateCountZoneMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.ZoneMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountLevelMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.LevelMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountLotMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.LotMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountHeightMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.HeightMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountAccessMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.AccessMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountHouseholdOrPropertyMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.HouseholdOrPropertyMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountAllowedManufacturedMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.AllowedManufacturedMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountAllowedSoldMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.AllowedSoldMatch;
+                }
+
+                if (selectionTrace.m_CandidateCountAllowedStoredMatch == 0)
+                {
+                    return ProbeCandidateFilterStage.AllowedStoredMatch;
+                }
+
+                return ProbeCandidateFilterStage.None;
+            }
+
+            private static ProbeCandidateSamples GetRejectSamples(SelectionTrace selectionTrace, ProbeCandidateFilterStage zeroStage)
+            {
+                return zeroStage switch
+                {
+                    ProbeCandidateFilterStage.LevelMatch => selectionTrace.m_LevelRejectSamples,
+                    ProbeCandidateFilterStage.LotMatch => selectionTrace.m_LotRejectSamples,
+                    ProbeCandidateFilterStage.HeightMatch => selectionTrace.m_HeightRejectSamples,
+                    ProbeCandidateFilterStage.AccessMatch => selectionTrace.m_AccessRejectSamples,
+                    ProbeCandidateFilterStage.HouseholdOrPropertyMatch => selectionTrace.m_HouseholdOrPropertyRejectSamples,
+                    ProbeCandidateFilterStage.AllowedManufacturedMatch => selectionTrace.m_AllowedManufacturedRejectSamples,
+                    ProbeCandidateFilterStage.AllowedSoldMatch => selectionTrace.m_AllowedSoldRejectSamples,
+                    ProbeCandidateFilterStage.AllowedStoredMatch => selectionTrace.m_AllowedStoredRejectSamples,
+                    _ => default,
+                };
+            }
+
+            private static void CopySelectionSamples(ref ProbeRecord probeRecord, ProbeCandidateSamples samples)
+            {
+                probeRecord.m_SelectionSample1 = samples.m_Sample1;
+                probeRecord.m_SelectionSample2 = samples.m_Sample2;
+                probeRecord.m_SelectionSample3 = samples.m_Sample3;
             }
 
             /// <summary>
@@ -924,6 +1259,7 @@ namespace PlopTheGrowables
             ProbeCounters levelupCounters = default;
             ProbeCounters leveldownCounters = default;
             List<ProbeRecord> detailRecords = new (ProbeDetailLimit);
+            List<ProbeRecord> selectionBreakdownRecords = new ();
 
             while (_probeQueue.TryDequeue(out ProbeRecord record))
             {
@@ -933,6 +1269,11 @@ namespace PlopTheGrowables
                     if (record.m_IsDetail != 0 && detailRecords.Count < ProbeDetailLimit)
                     {
                         detailRecords.Add(record);
+                    }
+
+                    if (record.m_HasSelectionBreakdown != 0)
+                    {
+                        selectionBreakdownRecords.Add(record);
                     }
                 }
                 else
@@ -946,6 +1287,11 @@ namespace PlopTheGrowables
             {
                 LogHistoricalDetail(detailRecord);
             }
+
+            foreach (ProbeRecord breakdownRecord in selectionBreakdownRecords)
+            {
+                LogHistoricalSelectionBreakdown(breakdownRecord);
+            }
         }
 
         private void LogHistoricalSummary(uint frame, int levelupQueueCount, int leveldownQueueCount, ProbeCounters levelupCounters, ProbeCounters leveldownCounters)
@@ -955,7 +1301,22 @@ namespace PlopTheGrowables
 
         private void LogHistoricalDetail(ProbeRecord record)
         {
-            Mod.Instance.Log.Info(CompatibilityProbeLog.Format("detail", $"system=HistoricalLevellingSystem, decision={GetDecisionLabel(record.m_DecisionKind)}, skip_reason={GetReasonLabel(record.m_Reason)}, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, spawned={FormatBool(record.m_Spawned)}, plopped={FormatBool(record.m_Plopped)}, signature={FormatBool(record.m_Signature)}, level_locked={FormatBool(record.m_LevelLocked)}, property_on_market={FormatBool(record.m_PropertyOnMarket)}, property_to_be_on_market={FormatBool(record.m_PropertyToBeOnMarket)}, under_construction={FormatBool(record.m_UnderConstruction)}, renter_count={record.m_RenterCount}, selected_next_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectedNextPrefab)}, select_failed_no_candidate={FormatBool(record.m_SelectFailedNoCandidate)})"));
+            Mod.Instance.Log.Info(GetHistoricalDetailLogLine(record));
+        }
+
+        private void LogHistoricalSelectionBreakdown(ProbeRecord record)
+        {
+            Mod.Instance.Log.Info(GetHistoricalSelectionBreakdownLogLine(record));
+        }
+
+        private static string GetHistoricalDetailLogLine(ProbeRecord record)
+        {
+            return CompatibilityProbeLog.Format("detail", $"system=HistoricalLevellingSystem, decision={GetDecisionLabel(record.m_DecisionKind)}, skip_reason={GetReasonLabel(record.m_Reason)}, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, spawned={FormatBool(record.m_Spawned)}, plopped={FormatBool(record.m_Plopped)}, signature={FormatBool(record.m_Signature)}, level_locked={FormatBool(record.m_LevelLocked)}, property_on_market={FormatBool(record.m_PropertyOnMarket)}, property_to_be_on_market={FormatBool(record.m_PropertyToBeOnMarket)}, under_construction={FormatBool(record.m_UnderConstruction)}, renter_count={record.m_RenterCount}, selected_next_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectedNextPrefab)}, select_failed_no_candidate={FormatBool(record.m_SelectFailedNoCandidate)}, candidate_count_final={FormatCandidateCount(record.m_CandidateCountFinal)})");
+        }
+
+        private static string GetHistoricalSelectionBreakdownLogLine(ProbeRecord record)
+        {
+            return CompatibilityProbeLog.Format("selection_breakdown", $"system=HistoricalLevellingSystem, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, target_level={record.m_TargetLevel}, zone_type={CompatibilityProbeLog.FormatZoneType(record.m_ZoneType)}, lot_size={CompatibilityProbeLog.FormatInt2(record.m_LotSize)}, max_height={CompatibilityProbeLog.FormatFloat(record.m_MaxHeight)}, access_flags={CompatibilityProbeLog.FormatAccessFlags(record.m_AccessFlags)}, candidate_zero_stage={GetCandidateFilterStageLabel(record.m_CandidateZeroStage)}, candidate_count_zone_match={record.m_CandidateCountZoneMatch}, candidate_count_level_match={record.m_CandidateCountLevelMatch}, candidate_count_lot_match={record.m_CandidateCountLotMatch}, candidate_count_height_match={record.m_CandidateCountHeightMatch}, candidate_count_access_match={record.m_CandidateCountAccessMatch}, candidate_count_household_or_property_match={record.m_CandidateCountHouseholdOrPropertyMatch}, candidate_count_allowed_manufactured_match={record.m_CandidateCountAllowedManufacturedMatch}, candidate_count_allowed_sold_match={record.m_CandidateCountAllowedSoldMatch}, candidate_count_allowed_stored_match={record.m_CandidateCountAllowedStoredMatch}, candidate_count_final={FormatCandidateCount(record.m_CandidateCountFinal)}, sample1_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample1.m_Prefab)}, sample1_height={FormatSampleHeight(record.m_SelectionSample1)}, sample1_lot_size={FormatSampleLotSize(record.m_SelectionSample1)}, sample1_access_flags={FormatSampleAccessFlags(record.m_SelectionSample1)}, sample1_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample1.m_RejectStage)}, sample2_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample2.m_Prefab)}, sample2_height={FormatSampleHeight(record.m_SelectionSample2)}, sample2_lot_size={FormatSampleLotSize(record.m_SelectionSample2)}, sample2_access_flags={FormatSampleAccessFlags(record.m_SelectionSample2)}, sample2_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample2.m_RejectStage)}, sample3_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample3.m_Prefab)}, sample3_height={FormatSampleHeight(record.m_SelectionSample3)}, sample3_lot_size={FormatSampleLotSize(record.m_SelectionSample3)}, sample3_access_flags={FormatSampleAccessFlags(record.m_SelectionSample3)}, sample3_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample3.m_RejectStage)})");
         }
 
         private static void AccumulateRecord(ref ProbeCounters counters, ProbeRecord record)
@@ -1030,6 +1391,47 @@ namespace PlopTheGrowables
                 _ => "none",
             };
         }
+
+        private static string GetCandidateFilterStageLabel(ProbeCandidateFilterStage stage)
+        {
+            return stage switch
+            {
+                ProbeCandidateFilterStage.ZoneMatch => "zone_match",
+                ProbeCandidateFilterStage.LevelMatch => "level_match",
+                ProbeCandidateFilterStage.LotMatch => "lot_match",
+                ProbeCandidateFilterStage.HeightMatch => "height_match",
+                ProbeCandidateFilterStage.AccessMatch => "access_match",
+                ProbeCandidateFilterStage.HouseholdOrPropertyMatch => "household_or_property_match",
+                ProbeCandidateFilterStage.AllowedManufacturedMatch => "allowed_manufactured_match",
+                ProbeCandidateFilterStage.AllowedSoldMatch => "allowed_sold_match",
+                ProbeCandidateFilterStage.AllowedStoredMatch => "allowed_stored_match",
+                _ => "none",
+            };
+        }
+
+        private static string GetCandidateRejectReasonLabel(ProbeCandidateFilterStage stage)
+        {
+            return stage switch
+            {
+                ProbeCandidateFilterStage.LevelMatch => "level_mismatch",
+                ProbeCandidateFilterStage.LotMatch => "lot_size_mismatch",
+                ProbeCandidateFilterStage.HeightMatch => "height_mismatch",
+                ProbeCandidateFilterStage.AccessMatch => "access_flags_mismatch",
+                ProbeCandidateFilterStage.HouseholdOrPropertyMatch => "household_or_property_mismatch",
+                ProbeCandidateFilterStage.AllowedManufacturedMatch => "allowed_manufactured_mismatch",
+                ProbeCandidateFilterStage.AllowedSoldMatch => "allowed_sold_mismatch",
+                ProbeCandidateFilterStage.AllowedStoredMatch => "allowed_stored_mismatch",
+                _ => "none",
+            };
+        }
+
+        private static string FormatCandidateCount(int count) => count < 0 ? "unknown" : count.ToString(CultureInfo.InvariantCulture);
+
+        private static string FormatSampleHeight(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatFloat(sample.m_Height);
+
+        private static string FormatSampleLotSize(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatInt2(sample.m_LotSize);
+
+        private static string FormatSampleAccessFlags(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatAccessFlags(sample.m_AccessFlags);
 
         private static string FormatBool(byte value) => value == 0 ? "false" : "true";
     }
