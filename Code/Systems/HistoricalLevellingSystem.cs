@@ -39,6 +39,8 @@ namespace PlopTheGrowables
         private NativeQueue<Entity> _levelupQueue;
         private NativeQueue<Entity> _leveldownQueue;
         private NativeQueue<ProbeRecord> _probeQueue;
+        private HashSet<int> _loggedZoneInventoryZoneTypes;
+        private HashSet<long> _loggedSpawnGroupAuditZonePrefabs;
 
         // System references.
         private SimulationSystem _simulationSystem;
@@ -143,6 +145,22 @@ namespace PlopTheGrowables
             public ProbeCandidateSample m_Sample3;
         }
 
+        private struct ProbeSpawnGroupAuditSample
+        {
+            public Entity m_Prefab;
+            public ZoneType m_GroupZoneType;
+            public int m_Level;
+            public int2 m_LotSize;
+        }
+
+        private struct ProbeSpawnGroupAuditSamples
+        {
+            public byte m_Count;
+            public ProbeSpawnGroupAuditSample m_Sample1;
+            public ProbeSpawnGroupAuditSample m_Sample2;
+            public ProbeSpawnGroupAuditSample m_Sample3;
+        }
+
         private struct SelectionTrace
         {
             public int m_CandidateCountZoneMatch;
@@ -154,6 +172,21 @@ namespace PlopTheGrowables
             public int m_CandidateCountAllowedManufacturedMatch;
             public int m_CandidateCountAllowedSoldMatch;
             public int m_CandidateCountAllowedStoredMatch;
+            public int m_InventoryCountSameZoneType;
+            public int m_InventoryCountSameZoneTypeTargetLevel;
+            public int m_InventoryCountSameZonePrefab;
+            public int m_InventoryCountSameZonePrefabTargetLevel;
+            public int m_InventoryCountSameZonePrefabInsideRequestedZoneType;
+            public int m_InventoryCountSameZonePrefabOutsideRequestedZoneType;
+            public int m_ZoneInventoryLevel1Count;
+            public int m_ZoneInventoryLevel2Count;
+            public int m_ZoneInventoryLevel3Count;
+            public int m_ZoneInventoryLevel4Count;
+            public int m_ZoneInventoryLevel5Count;
+            public int m_ZoneInventoryResidentialCount;
+            public int m_ZoneInventoryCommercialCount;
+            public int m_ZoneInventoryIndustrialCount;
+            public int m_ZoneInventoryOfficeCount;
             public ProbeCandidateSamples m_LevelRejectSamples;
             public ProbeCandidateSamples m_LotRejectSamples;
             public ProbeCandidateSamples m_HeightRejectSamples;
@@ -162,6 +195,7 @@ namespace PlopTheGrowables
             public ProbeCandidateSamples m_AllowedManufacturedRejectSamples;
             public ProbeCandidateSamples m_AllowedSoldRejectSamples;
             public ProbeCandidateSamples m_AllowedStoredRejectSamples;
+            public ProbeSpawnGroupAuditSamples m_SpawnGroupAuditSamples;
         }
 
         private struct ProbeRecord
@@ -173,6 +207,7 @@ namespace PlopTheGrowables
             public ProbeCandidateFilterStage m_CandidateZeroStage;
             public Entity m_Building;
             public Entity m_CurrentPrefab;
+            public Entity m_CurrentZonePrefab;
             public Entity m_SelectedNextPrefab;
             public int m_CurrentLevel;
             public int m_TargetLevel;
@@ -183,11 +218,13 @@ namespace PlopTheGrowables
             public byte m_PropertyOnMarket;
             public byte m_PropertyToBeOnMarket;
             public byte m_UnderConstruction;
+            public byte m_CurrentZonePrefabEnabled;
             public byte m_SelectFailedNoCandidate;
             public byte m_HasSelectionBreakdown;
             public byte m_IsDetail;
             public int m_RenterCount;
             public ZoneType m_ZoneType;
+            public ZoneType m_CurrentZonePrefabZoneType;
             public int2 m_LotSize;
             public float m_MaxHeight;
             public BuildingFlags m_AccessFlags;
@@ -201,9 +238,27 @@ namespace PlopTheGrowables
             public int m_CandidateCountAllowedSoldMatch;
             public int m_CandidateCountAllowedStoredMatch;
             public int m_CandidateCountFinal;
+            public int m_InventoryCountSameZoneType;
+            public int m_InventoryCountSameZoneTypeTargetLevel;
+            public int m_InventoryCountSameZonePrefab;
+            public int m_InventoryCountSameZonePrefabTargetLevel;
+            public int m_InventoryCountSameZonePrefabInsideRequestedZoneType;
+            public int m_InventoryCountSameZonePrefabOutsideRequestedZoneType;
+            public int m_ZoneInventoryLevel1Count;
+            public int m_ZoneInventoryLevel2Count;
+            public int m_ZoneInventoryLevel3Count;
+            public int m_ZoneInventoryLevel4Count;
+            public int m_ZoneInventoryLevel5Count;
+            public int m_ZoneInventoryResidentialCount;
+            public int m_ZoneInventoryCommercialCount;
+            public int m_ZoneInventoryIndustrialCount;
+            public int m_ZoneInventoryOfficeCount;
             public ProbeCandidateSample m_SelectionSample1;
             public ProbeCandidateSample m_SelectionSample2;
             public ProbeCandidateSample m_SelectionSample3;
+            public ProbeSpawnGroupAuditSample m_SpawnGroupAuditSample1;
+            public ProbeSpawnGroupAuditSample m_SpawnGroupAuditSample2;
+            public ProbeSpawnGroupAuditSample m_SpawnGroupAuditSample3;
         }
 
         private struct ProbeCounters
@@ -252,6 +307,8 @@ namespace PlopTheGrowables
             _buildingSettingsQuery = GetEntityQuery(ComponentType.ReadOnly<BuildingConfigurationData>());
             _endFrameBarrier = World.GetOrCreateSystemManaged<EndFrameBarrier>();
             _probeQueue = new NativeQueue<ProbeRecord>(Allocator.Persistent);
+            _loggedZoneInventoryZoneTypes = new HashSet<int>();
+            _loggedSpawnGroupAuditZonePrefabs = new HashSet<long>();
             RequireForUpdate(_buildingSettingsQuery);
 
             // Reflect level up queue.
@@ -420,6 +477,9 @@ namespace PlopTheGrowables
                 _probeQueue.Dispose();
             }
 
+            _loggedZoneInventoryZoneTypes?.Clear();
+            _loggedSpawnGroupAuditZonePrefabs?.Clear();
+
             base.OnDestroy();
         }
 
@@ -535,7 +595,20 @@ namespace PlopTheGrowables
                     SpawnableBuildingData spawnableBuildingData = m_SpawnableBuildings[prefab];
                     probeRecord.m_CurrentLevel = spawnableBuildingData.m_Level;
                     probeRecord.m_AreaClass = GetAreaClass(m_BuildingPropertyDatas[prefab], prefab);
-                    if (!m_PrefabDatas.IsComponentEnabled(spawnableBuildingData.m_ZonePrefab))
+                    Entity currentZonePrefab = spawnableBuildingData.m_ZonePrefab;
+                    ZoneData zoneData = m_ZoneData[currentZonePrefab];
+                    BuildingData prefabBuildingData = m_Buildings[prefab];
+                    bool currentZonePrefabEnabled = m_PrefabDatas.IsComponentEnabled(currentZonePrefab);
+                    int targetLevel = spawnableBuildingData.m_Level + 1;
+                    BuildingFlags accessFlags = prefabBuildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess);
+                    probeRecord.m_CurrentZonePrefab = currentZonePrefab;
+                    probeRecord.m_CurrentZonePrefabEnabled = (byte)(currentZonePrefabEnabled ? 1 : 0);
+                    probeRecord.m_CurrentZonePrefabZoneType = zoneData.m_ZoneType;
+                    probeRecord.m_ZoneType = zoneData.m_ZoneType;
+                    probeRecord.m_TargetLevel = targetLevel;
+                    probeRecord.m_LotSize = prefabBuildingData.m_LotSize;
+                    probeRecord.m_AccessFlags = accessFlags;
+                    if (!currentZonePrefabEnabled)
                     {
                         probeRecord.m_DecisionKind = ProbeDecisionKind.Skip;
                         probeRecord.m_Reason = ProbeReason.ZoneDisabled;
@@ -543,13 +616,11 @@ namespace PlopTheGrowables
                         continue;
                     }
 
-                    BuildingData prefabBuildingData = m_Buildings[prefab];
                     BuildingPropertyData buildingPropertyData = m_BuildingPropertyDatas[prefab];
-                    ZoneData zoneData = m_ZoneData[spawnableBuildingData.m_ZonePrefab];
                     float maxHeight = GetMaxHeight(item, prefabBuildingData);
-                    int targetLevel = spawnableBuildingData.m_Level + 1;
+                    probeRecord.m_MaxHeight = maxHeight;
                     bool captureSelectionTrace = isDetail || IsPrioritySelectionProbe(probeRecord.m_AreaClass, targetLevel);
-                    Entity entity = SelectSpawnableBuilding(zoneData.m_ZoneType, targetLevel, prefabBuildingData.m_LotSize, maxHeight, prefabBuildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess), buildingPropertyData, captureSelectionTrace, ref probeRecord, ref random);
+                    Entity entity = SelectSpawnableBuilding(zoneData.m_ZoneType, targetLevel, currentZonePrefab, prefabBuildingData.m_LotSize, maxHeight, accessFlags, buildingPropertyData, captureSelectionTrace, ref probeRecord, ref random);
 
                     if (entity == Entity.Null)
                     {
@@ -660,6 +731,7 @@ namespace PlopTheGrowables
             /// </summary>
             /// <param name="zoneType">Zone type.</param>
             /// <param name="level">Target building level.</param>
+            /// <param name="currentZonePrefab">Current zone prefab.</param>
             /// <param name="lotSize">Lot size.</param>
             /// <param name="maxHeight">Building maximum height.</param>
             /// <param name="accessFlags">Building access flags.</param>
@@ -668,7 +740,7 @@ namespace PlopTheGrowables
             /// <param name="probeRecord">Probe record to update with trace data.</param>
             /// <param name="random">Random struct.</param>
             /// <returns>Selected building entity.</returns>
-            private Entity SelectSpawnableBuilding(ZoneType zoneType, int level, int2 lotSize, float maxHeight, BuildingFlags accessFlags, BuildingPropertyData buildingPropertyData, bool captureSelectionTrace, ref ProbeRecord probeRecord, ref Random random)
+            private Entity SelectSpawnableBuilding(ZoneType zoneType, int level, Entity currentZonePrefab, int2 lotSize, float maxHeight, BuildingFlags accessFlags, BuildingPropertyData buildingPropertyData, bool captureSelectionTrace, ref ProbeRecord probeRecord, ref Random random)
             {
                 int num = 0;
                 Entity result = Entity.Null;
@@ -676,7 +748,9 @@ namespace PlopTheGrowables
                 for (int i = 0; i < m_SpawnableBuildingChunks.Length; i++)
                 {
                     ArchetypeChunk archetypeChunk = m_SpawnableBuildingChunks[i];
-                    if (!archetypeChunk.GetSharedComponent(m_BuildingSpawnGroupType).m_ZoneType.Equals(zoneType))
+                    BuildingSpawnGroupData buildingSpawnGroupData = archetypeChunk.GetSharedComponent(m_BuildingSpawnGroupType);
+                    bool matchesRequestedZoneType = buildingSpawnGroupData.m_ZoneType.Equals(zoneType);
+                    if (!captureSelectionTrace && !matchesRequestedZoneType)
                     {
                         continue;
                     }
@@ -693,6 +767,43 @@ namespace PlopTheGrowables
                         BuildingPropertyData buildingPropertyData2 = nativeArray4[j];
                         ObjectGeometryData objectGeometryData = nativeArray5[j];
                         BuildingFlags candidateAccessFlags = buildingData.m_Flags & (BuildingFlags.LeftAccess | BuildingFlags.RightAccess);
+
+                        if (captureSelectionTrace)
+                        {
+                            if (matchesRequestedZoneType)
+                            {
+                                selectionTrace.m_InventoryCountSameZoneType++;
+                                AccumulateZoneInventoryCounts(ref selectionTrace, GetAreaClass(buildingPropertyData2, nativeArray[j]), spawnableBuildingData.m_Level);
+                                if (level == spawnableBuildingData.m_Level)
+                                {
+                                    selectionTrace.m_InventoryCountSameZoneTypeTargetLevel++;
+                                }
+                            }
+
+                            if (spawnableBuildingData.m_ZonePrefab == currentZonePrefab)
+                            {
+                                selectionTrace.m_InventoryCountSameZonePrefab++;
+                                if (level == spawnableBuildingData.m_Level)
+                                {
+                                    selectionTrace.m_InventoryCountSameZonePrefabTargetLevel++;
+                                }
+
+                                if (matchesRequestedZoneType)
+                                {
+                                    selectionTrace.m_InventoryCountSameZonePrefabInsideRequestedZoneType++;
+                                }
+                                else
+                                {
+                                    selectionTrace.m_InventoryCountSameZonePrefabOutsideRequestedZoneType++;
+                                    CaptureSpawnGroupAuditSample(ref selectionTrace.m_SpawnGroupAuditSamples, nativeArray[j], buildingSpawnGroupData.m_ZoneType, spawnableBuildingData.m_Level, buildingData.m_LotSize);
+                                }
+                            }
+                        }
+
+                        if (!matchesRequestedZoneType)
+                        {
+                            continue;
+                        }
 
                         if (captureSelectionTrace)
                         {
@@ -833,10 +944,48 @@ namespace PlopTheGrowables
 
                 if (captureSelectionTrace)
                 {
-                    ApplySelectionTrace(ref probeRecord, zoneType, level, lotSize, maxHeight, accessFlags, ref selectionTrace, result == Entity.Null);
+                    ApplySelectionTrace(ref probeRecord, ref selectionTrace, result == Entity.Null);
                 }
 
                 return result;
+            }
+
+            private static void AccumulateZoneInventoryCounts(ref SelectionTrace selectionTrace, ProbeAreaClass areaClass, int level)
+            {
+                switch (level)
+                {
+                    case 1:
+                        selectionTrace.m_ZoneInventoryLevel1Count++;
+                        break;
+                    case 2:
+                        selectionTrace.m_ZoneInventoryLevel2Count++;
+                        break;
+                    case 3:
+                        selectionTrace.m_ZoneInventoryLevel3Count++;
+                        break;
+                    case 4:
+                        selectionTrace.m_ZoneInventoryLevel4Count++;
+                        break;
+                    case 5:
+                        selectionTrace.m_ZoneInventoryLevel5Count++;
+                        break;
+                }
+
+                switch (areaClass)
+                {
+                    case ProbeAreaClass.Residential:
+                        selectionTrace.m_ZoneInventoryResidentialCount++;
+                        break;
+                    case ProbeAreaClass.Commercial:
+                        selectionTrace.m_ZoneInventoryCommercialCount++;
+                        break;
+                    case ProbeAreaClass.Industrial:
+                        selectionTrace.m_ZoneInventoryIndustrialCount++;
+                        break;
+                    case ProbeAreaClass.Office:
+                        selectionTrace.m_ZoneInventoryOfficeCount++;
+                        break;
+                }
             }
 
             private static void CaptureRejectSample(ref ProbeCandidateSamples samples, Entity prefab, ObjectGeometryData objectGeometryData, BuildingData buildingData, ProbeCandidateFilterStage rejectStage)
@@ -869,13 +1018,37 @@ namespace PlopTheGrowables
                 samples.m_Count++;
             }
 
-            private static void ApplySelectionTrace(ref ProbeRecord probeRecord, ZoneType zoneType, int level, int2 lotSize, float maxHeight, BuildingFlags accessFlags, ref SelectionTrace selectionTrace, bool selectionFailed)
+            private static void CaptureSpawnGroupAuditSample(ref ProbeSpawnGroupAuditSamples samples, Entity prefab, ZoneType groupZoneType, int level, int2 lotSize)
             {
-                probeRecord.m_ZoneType = zoneType;
-                probeRecord.m_TargetLevel = level;
-                probeRecord.m_LotSize = lotSize;
-                probeRecord.m_MaxHeight = maxHeight;
-                probeRecord.m_AccessFlags = accessFlags;
+                if (samples.m_Count >= 3)
+                {
+                    return;
+                }
+
+                ProbeSpawnGroupAuditSample sample = default;
+                sample.m_Prefab = prefab;
+                sample.m_GroupZoneType = groupZoneType;
+                sample.m_Level = level;
+                sample.m_LotSize = lotSize;
+
+                switch (samples.m_Count)
+                {
+                    case 0:
+                        samples.m_Sample1 = sample;
+                        break;
+                    case 1:
+                        samples.m_Sample2 = sample;
+                        break;
+                    default:
+                        samples.m_Sample3 = sample;
+                        break;
+                }
+
+                samples.m_Count++;
+            }
+
+            private static void ApplySelectionTrace(ref ProbeRecord probeRecord, ref SelectionTrace selectionTrace, bool selectionFailed)
+            {
                 probeRecord.m_CandidateCountZoneMatch = selectionTrace.m_CandidateCountZoneMatch;
                 probeRecord.m_CandidateCountLevelMatch = selectionTrace.m_CandidateCountLevelMatch;
                 probeRecord.m_CandidateCountLotMatch = selectionTrace.m_CandidateCountLotMatch;
@@ -886,6 +1059,21 @@ namespace PlopTheGrowables
                 probeRecord.m_CandidateCountAllowedSoldMatch = selectionTrace.m_CandidateCountAllowedSoldMatch;
                 probeRecord.m_CandidateCountAllowedStoredMatch = selectionTrace.m_CandidateCountAllowedStoredMatch;
                 probeRecord.m_CandidateCountFinal = selectionTrace.m_CandidateCountAllowedStoredMatch;
+                probeRecord.m_InventoryCountSameZoneType = selectionTrace.m_InventoryCountSameZoneType;
+                probeRecord.m_InventoryCountSameZoneTypeTargetLevel = selectionTrace.m_InventoryCountSameZoneTypeTargetLevel;
+                probeRecord.m_InventoryCountSameZonePrefab = selectionTrace.m_InventoryCountSameZonePrefab;
+                probeRecord.m_InventoryCountSameZonePrefabTargetLevel = selectionTrace.m_InventoryCountSameZonePrefabTargetLevel;
+                probeRecord.m_InventoryCountSameZonePrefabInsideRequestedZoneType = selectionTrace.m_InventoryCountSameZonePrefabInsideRequestedZoneType;
+                probeRecord.m_InventoryCountSameZonePrefabOutsideRequestedZoneType = selectionTrace.m_InventoryCountSameZonePrefabOutsideRequestedZoneType;
+                probeRecord.m_ZoneInventoryLevel1Count = selectionTrace.m_ZoneInventoryLevel1Count;
+                probeRecord.m_ZoneInventoryLevel2Count = selectionTrace.m_ZoneInventoryLevel2Count;
+                probeRecord.m_ZoneInventoryLevel3Count = selectionTrace.m_ZoneInventoryLevel3Count;
+                probeRecord.m_ZoneInventoryLevel4Count = selectionTrace.m_ZoneInventoryLevel4Count;
+                probeRecord.m_ZoneInventoryLevel5Count = selectionTrace.m_ZoneInventoryLevel5Count;
+                probeRecord.m_ZoneInventoryResidentialCount = selectionTrace.m_ZoneInventoryResidentialCount;
+                probeRecord.m_ZoneInventoryCommercialCount = selectionTrace.m_ZoneInventoryCommercialCount;
+                probeRecord.m_ZoneInventoryIndustrialCount = selectionTrace.m_ZoneInventoryIndustrialCount;
+                probeRecord.m_ZoneInventoryOfficeCount = selectionTrace.m_ZoneInventoryOfficeCount;
 
                 if (!selectionFailed)
                 {
@@ -895,6 +1083,7 @@ namespace PlopTheGrowables
                 probeRecord.m_HasSelectionBreakdown = 1;
                 probeRecord.m_CandidateZeroStage = DetermineCandidateZeroStage(selectionTrace);
                 CopySelectionSamples(ref probeRecord, GetRejectSamples(selectionTrace, probeRecord.m_CandidateZeroStage));
+                CopySpawnGroupAuditSamples(ref probeRecord, selectionTrace.m_SpawnGroupAuditSamples);
             }
 
             private static ProbeCandidateFilterStage DetermineCandidateZeroStage(SelectionTrace selectionTrace)
@@ -968,6 +1157,13 @@ namespace PlopTheGrowables
                 probeRecord.m_SelectionSample1 = samples.m_Sample1;
                 probeRecord.m_SelectionSample2 = samples.m_Sample2;
                 probeRecord.m_SelectionSample3 = samples.m_Sample3;
+            }
+
+            private static void CopySpawnGroupAuditSamples(ref ProbeRecord probeRecord, ProbeSpawnGroupAuditSamples samples)
+            {
+                probeRecord.m_SpawnGroupAuditSample1 = samples.m_Sample1;
+                probeRecord.m_SpawnGroupAuditSample2 = samples.m_Sample2;
+                probeRecord.m_SpawnGroupAuditSample3 = samples.m_Sample3;
             }
 
             /// <summary>
@@ -1291,6 +1487,12 @@ namespace PlopTheGrowables
             foreach (ProbeRecord breakdownRecord in selectionBreakdownRecords)
             {
                 LogHistoricalSelectionBreakdown(breakdownRecord);
+                if (breakdownRecord.m_CandidateZeroStage == ProbeCandidateFilterStage.ZoneMatch)
+                {
+                    LogHistoricalSelectionZoneBucket(breakdownRecord);
+                    TryLogHistoricalZoneInventory(breakdownRecord);
+                    TryLogHistoricalSpawnGroupAudit(breakdownRecord);
+                }
             }
         }
 
@@ -1309,14 +1511,55 @@ namespace PlopTheGrowables
             Mod.Instance.Log.Info(GetHistoricalSelectionBreakdownLogLine(record));
         }
 
+        private void LogHistoricalSelectionZoneBucket(ProbeRecord record)
+        {
+            Mod.Instance.Log.Info(GetHistoricalSelectionZoneBucketLogLine(record));
+        }
+
+        private void TryLogHistoricalZoneInventory(ProbeRecord record)
+        {
+            if (_loggedZoneInventoryZoneTypes.Add(record.m_ZoneType.m_Index))
+            {
+                Mod.Instance.Log.Info(GetHistoricalZoneInventoryLogLine(record));
+            }
+        }
+
+        private void TryLogHistoricalSpawnGroupAudit(ProbeRecord record)
+        {
+            if (record.m_CurrentZonePrefab == Entity.Null)
+            {
+                return;
+            }
+
+            if (_loggedSpawnGroupAuditZonePrefabs.Add(GetEntityKey(record.m_CurrentZonePrefab)))
+            {
+                Mod.Instance.Log.Info(GetHistoricalSpawnGroupAuditLogLine(record));
+            }
+        }
+
         private static string GetHistoricalDetailLogLine(ProbeRecord record)
         {
-            return CompatibilityProbeLog.Format("detail", $"system=HistoricalLevellingSystem, decision={GetDecisionLabel(record.m_DecisionKind)}, skip_reason={GetReasonLabel(record.m_Reason)}, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, spawned={FormatBool(record.m_Spawned)}, plopped={FormatBool(record.m_Plopped)}, signature={FormatBool(record.m_Signature)}, level_locked={FormatBool(record.m_LevelLocked)}, property_on_market={FormatBool(record.m_PropertyOnMarket)}, property_to_be_on_market={FormatBool(record.m_PropertyToBeOnMarket)}, under_construction={FormatBool(record.m_UnderConstruction)}, renter_count={record.m_RenterCount}, selected_next_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectedNextPrefab)}, select_failed_no_candidate={FormatBool(record.m_SelectFailedNoCandidate)}, candidate_count_final={FormatCandidateCount(record.m_CandidateCountFinal)})");
+            return CompatibilityProbeLog.Format("detail", $"system=HistoricalLevellingSystem, decision={GetDecisionLabel(record.m_DecisionKind)}, skip_reason={GetReasonLabel(record.m_Reason)}, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, spawned={FormatBool(record.m_Spawned)}, plopped={FormatBool(record.m_Plopped)}, signature={FormatBool(record.m_Signature)}, level_locked={FormatBool(record.m_LevelLocked)}, property_on_market={FormatBool(record.m_PropertyOnMarket)}, property_to_be_on_market={FormatBool(record.m_PropertyToBeOnMarket)}, under_construction={FormatBool(record.m_UnderConstruction)}, renter_count={record.m_RenterCount}, selected_next_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectedNextPrefab)}, select_failed_no_candidate={FormatBool(record.m_SelectFailedNoCandidate)}, candidate_count_final={FormatCandidateCount(record.m_CandidateCountFinal)}, current_zone_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentZonePrefab)}, zone_type={FormatOptionalZoneType(record)}, target_level={FormatOptionalTargetLevel(record.m_TargetLevel)}, lot_size={FormatOptionalLotSize(record)}, access_flags={FormatOptionalAccessFlags(record)})");
         }
 
         private static string GetHistoricalSelectionBreakdownLogLine(ProbeRecord record)
         {
             return CompatibilityProbeLog.Format("selection_breakdown", $"system=HistoricalLevellingSystem, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_level={record.m_CurrentLevel}, area_class={GetAreaClassLabel(record.m_AreaClass)}, target_level={record.m_TargetLevel}, zone_type={CompatibilityProbeLog.FormatZoneType(record.m_ZoneType)}, lot_size={CompatibilityProbeLog.FormatInt2(record.m_LotSize)}, max_height={CompatibilityProbeLog.FormatFloat(record.m_MaxHeight)}, access_flags={CompatibilityProbeLog.FormatAccessFlags(record.m_AccessFlags)}, candidate_zero_stage={GetCandidateFilterStageLabel(record.m_CandidateZeroStage)}, candidate_count_zone_match={record.m_CandidateCountZoneMatch}, candidate_count_level_match={record.m_CandidateCountLevelMatch}, candidate_count_lot_match={record.m_CandidateCountLotMatch}, candidate_count_height_match={record.m_CandidateCountHeightMatch}, candidate_count_access_match={record.m_CandidateCountAccessMatch}, candidate_count_household_or_property_match={record.m_CandidateCountHouseholdOrPropertyMatch}, candidate_count_allowed_manufactured_match={record.m_CandidateCountAllowedManufacturedMatch}, candidate_count_allowed_sold_match={record.m_CandidateCountAllowedSoldMatch}, candidate_count_allowed_stored_match={record.m_CandidateCountAllowedStoredMatch}, candidate_count_final={FormatCandidateCount(record.m_CandidateCountFinal)}, sample1_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample1.m_Prefab)}, sample1_height={FormatSampleHeight(record.m_SelectionSample1)}, sample1_lot_size={FormatSampleLotSize(record.m_SelectionSample1)}, sample1_access_flags={FormatSampleAccessFlags(record.m_SelectionSample1)}, sample1_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample1.m_RejectStage)}, sample2_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample2.m_Prefab)}, sample2_height={FormatSampleHeight(record.m_SelectionSample2)}, sample2_lot_size={FormatSampleLotSize(record.m_SelectionSample2)}, sample2_access_flags={FormatSampleAccessFlags(record.m_SelectionSample2)}, sample2_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample2.m_RejectStage)}, sample3_prefab={CompatibilityProbeLog.FormatEntity(record.m_SelectionSample3.m_Prefab)}, sample3_height={FormatSampleHeight(record.m_SelectionSample3)}, sample3_lot_size={FormatSampleLotSize(record.m_SelectionSample3)}, sample3_access_flags={FormatSampleAccessFlags(record.m_SelectionSample3)}, sample3_reject_reason={GetCandidateRejectReasonLabel(record.m_SelectionSample3.m_RejectStage)})");
+        }
+
+        private static string GetHistoricalSelectionZoneBucketLogLine(ProbeRecord record)
+        {
+            return CompatibilityProbeLog.Format("selection_zone_bucket", $"system=HistoricalLevellingSystem, building={CompatibilityProbeLog.FormatEntity(record.m_Building)}, current_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentPrefab)}, current_zone_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentZonePrefab)}, current_zone_prefab_enabled={FormatOptionalZonePrefabEnabled(record)}, requested_zone_type={CompatibilityProbeLog.FormatZoneType(record.m_ZoneType)}, current_zone_prefab_zone_type={FormatOptionalCurrentZonePrefabZoneType(record)}, target_level={record.m_TargetLevel}, lot_size={CompatibilityProbeLog.FormatInt2(record.m_LotSize)}, access_flags={CompatibilityProbeLog.FormatAccessFlags(record.m_AccessFlags)}, inventory_count_same_zone_type={record.m_InventoryCountSameZoneType}, inventory_count_same_zone_type_target_level={record.m_InventoryCountSameZoneTypeTargetLevel}, inventory_count_same_zone_prefab={record.m_InventoryCountSameZonePrefab}, inventory_count_same_zone_prefab_target_level={record.m_InventoryCountSameZonePrefabTargetLevel}, inventory_count_same_zone_prefab_inside_requested_zone_type={record.m_InventoryCountSameZonePrefabInsideRequestedZoneType}, inventory_count_same_zone_prefab_outside_requested_zone_type={record.m_InventoryCountSameZonePrefabOutsideRequestedZoneType})");
+        }
+
+        private static string GetHistoricalZoneInventoryLogLine(ProbeRecord record)
+        {
+            return CompatibilityProbeLog.Format("zone_inventory", $"system=HistoricalLevellingSystem, requested_zone_type={CompatibilityProbeLog.FormatZoneType(record.m_ZoneType)}, candidate_prefab_count={record.m_InventoryCountSameZoneType}, level1_count={record.m_ZoneInventoryLevel1Count}, level2_count={record.m_ZoneInventoryLevel2Count}, level3_count={record.m_ZoneInventoryLevel3Count}, level4_count={record.m_ZoneInventoryLevel4Count}, level5_count={record.m_ZoneInventoryLevel5Count}, residential_count={record.m_ZoneInventoryResidentialCount}, commercial_count={record.m_ZoneInventoryCommercialCount}, industrial_count={record.m_ZoneInventoryIndustrialCount}, office_count={record.m_ZoneInventoryOfficeCount})");
+        }
+
+        private static string GetHistoricalSpawnGroupAuditLogLine(ProbeRecord record)
+        {
+            return CompatibilityProbeLog.Format("spawn_group_audit", $"system=HistoricalLevellingSystem, current_zone_prefab={CompatibilityProbeLog.FormatEntity(record.m_CurrentZonePrefab)}, current_zone_prefab_enabled={FormatOptionalZonePrefabEnabled(record)}, current_zone_prefab_zone_type={FormatOptionalCurrentZonePrefabZoneType(record)}, requested_zone_type={CompatibilityProbeLog.FormatZoneType(record.m_ZoneType)}, same_zone_prefab_count_total={record.m_InventoryCountSameZonePrefab}, same_zone_prefab_count_inside_requested_zone_type={record.m_InventoryCountSameZonePrefabInsideRequestedZoneType}, same_zone_prefab_count_outside_requested_zone_type={record.m_InventoryCountSameZonePrefabOutsideRequestedZoneType}, sample1_prefab={CompatibilityProbeLog.FormatEntity(record.m_SpawnGroupAuditSample1.m_Prefab)}, sample1_group_zone_type={FormatSpawnGroupAuditSampleZoneType(record.m_SpawnGroupAuditSample1)}, sample1_level={FormatSpawnGroupAuditSampleLevel(record.m_SpawnGroupAuditSample1)}, sample1_lot_size={FormatSpawnGroupAuditSampleLotSize(record.m_SpawnGroupAuditSample1)}, sample2_prefab={CompatibilityProbeLog.FormatEntity(record.m_SpawnGroupAuditSample2.m_Prefab)}, sample2_group_zone_type={FormatSpawnGroupAuditSampleZoneType(record.m_SpawnGroupAuditSample2)}, sample2_level={FormatSpawnGroupAuditSampleLevel(record.m_SpawnGroupAuditSample2)}, sample2_lot_size={FormatSpawnGroupAuditSampleLotSize(record.m_SpawnGroupAuditSample2)}, sample3_prefab={CompatibilityProbeLog.FormatEntity(record.m_SpawnGroupAuditSample3.m_Prefab)}, sample3_group_zone_type={FormatSpawnGroupAuditSampleZoneType(record.m_SpawnGroupAuditSample3)}, sample3_level={FormatSpawnGroupAuditSampleLevel(record.m_SpawnGroupAuditSample3)}, sample3_lot_size={FormatSpawnGroupAuditSampleLotSize(record.m_SpawnGroupAuditSample3)})");
         }
 
         private static void AccumulateRecord(ref ProbeCounters counters, ProbeRecord record)
@@ -1425,13 +1668,35 @@ namespace PlopTheGrowables
             };
         }
 
+        private static long GetEntityKey(Entity entity) => ((long)entity.Version << 32) | (uint)entity.Index;
+
         private static string FormatCandidateCount(int count) => count < 0 ? "unknown" : count.ToString(CultureInfo.InvariantCulture);
+
+        private static string FormatOptionalZoneType(ProbeRecord record) => HasZoneContext(record) ? CompatibilityProbeLog.FormatZoneType(record.m_ZoneType) : "null";
+
+        private static string FormatOptionalTargetLevel(int level) => level < 0 ? "null" : level.ToString(CultureInfo.InvariantCulture);
+
+        private static string FormatOptionalLotSize(ProbeRecord record) => HasZoneContext(record) ? CompatibilityProbeLog.FormatInt2(record.m_LotSize) : "null";
+
+        private static string FormatOptionalAccessFlags(ProbeRecord record) => HasZoneContext(record) ? CompatibilityProbeLog.FormatAccessFlags(record.m_AccessFlags) : "null";
+
+        private static string FormatOptionalZonePrefabEnabled(ProbeRecord record) => record.m_CurrentZonePrefab == Entity.Null ? "null" : FormatBool(record.m_CurrentZonePrefabEnabled);
+
+        private static string FormatOptionalCurrentZonePrefabZoneType(ProbeRecord record) => record.m_CurrentZonePrefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatZoneType(record.m_CurrentZonePrefabZoneType);
 
         private static string FormatSampleHeight(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatFloat(sample.m_Height);
 
         private static string FormatSampleLotSize(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatInt2(sample.m_LotSize);
 
         private static string FormatSampleAccessFlags(ProbeCandidateSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatAccessFlags(sample.m_AccessFlags);
+
+        private static string FormatSpawnGroupAuditSampleZoneType(ProbeSpawnGroupAuditSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatZoneType(sample.m_GroupZoneType);
+
+        private static string FormatSpawnGroupAuditSampleLevel(ProbeSpawnGroupAuditSample sample) => sample.m_Prefab == Entity.Null ? "null" : sample.m_Level.ToString(CultureInfo.InvariantCulture);
+
+        private static string FormatSpawnGroupAuditSampleLotSize(ProbeSpawnGroupAuditSample sample) => sample.m_Prefab == Entity.Null ? "null" : CompatibilityProbeLog.FormatInt2(sample.m_LotSize);
+
+        private static bool HasZoneContext(ProbeRecord record) => record.m_TargetLevel >= 0;
 
         private static string FormatBool(byte value) => value == 0 ? "false" : "true";
     }
