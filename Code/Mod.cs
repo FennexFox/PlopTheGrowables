@@ -1,4 +1,4 @@
-﻿// <copyright file="Mod.cs" company="algernon (K. Algernon A. Sheppard)">
+// <copyright file="Mod.cs" company="algernon (K. Algernon A. Sheppard)">
 // Copyright (c) algernon (K. Algernon A. Sheppard). All rights reserved.
 // Licensed under the Apache Licence, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 // See LICENSE.txt file in the project root for full license information.
@@ -59,21 +59,24 @@ namespace PlopTheGrowables
             string investigationVariant = "no_custom_system";
             string historicalLevellingEnabled = CompatibilityProbeLog.FormatBool(false);
             string buildingUpkeepPatchEnabled = CompatibilityProbeLog.FormatBool(false);
+            string buildingUpkeepLoggerEnabled = CompatibilityProbeLog.FormatBool(true);
+            string vanillaLevellingObserverEnabled = CompatibilityProbeLog.FormatBool(true);
 #else
             string investigationVariant = "default";
             string historicalLevellingEnabled = CompatibilityProbeLog.FormatBool(true);
             string buildingUpkeepPatchEnabled = CompatibilityProbeLog.FormatBool(true);
+            string buildingUpkeepLoggerEnabled = CompatibilityProbeLog.FormatBool(false);
+            string vanillaLevellingObserverEnabled = CompatibilityProbeLog.FormatBool(false);
 #endif
             Log.Info($"loading {ModName} version {Assembly.GetExecutingAssembly().GetName().Version}");
-            Log.Info(CompatibilityProbeLog.Format("summary", $"system=Mod, event=startup_variant, investigation_variant={investigationVariant}, historical_levelling_enabled={historicalLevellingEnabled}, building_upkeep_patch_enabled={buildingUpkeepPatchEnabled}"));
+            Log.Info(CompatibilityProbeLog.Format("summary", $"system=Mod, event=startup_variant, investigation_variant={investigationVariant}, historical_levelling_enabled={historicalLevellingEnabled}, building_upkeep_patch_enabled={buildingUpkeepPatchEnabled}, building_upkeep_logger_enabled={buildingUpkeepLoggerEnabled}, vanilla_levelling_observer_enabled={vanillaLevellingObserverEnabled}"));
 
             // Apply harmony patches.
 #if PTG_NO_CUSTOM_SYSTEM
-            Log.Info("Skipping BuildingUpkeepSystem Harmony patch for investigation build.");
+            Log.Info("Applying logger-only BuildingUpkeepSystem patches for investigation build.");
             Log.Info(CompatibilityProbeLog.Format("summary", "system=Mod, event=investigation_warning, detail=levelling_locking_options_visible_but_out_of_scope_for_no_custom_system_variant"));
-#else
-            new Patcher("algernon-PlopTheGrowables", Log);
 #endif
+            new Patcher("algernon-PlopTheGrowables", Log);
 
             // Activate UI system.
             updateSystem.UpdateAt<PlopTheGrowablesUISystem>(SystemUpdatePhase.UIUpdate);
@@ -106,6 +109,10 @@ namespace PlopTheGrowables
 
             // Activate custom zone check system; must run after we've assigned ploppable flags.
             updateSystem.UpdateAfter<SelectiveZoneCheckSystem, PloppedBuildingSystem>(SystemUpdatePhase.ModificationEnd);
+
+#if PTG_NO_CUSTOM_SYSTEM
+            updateSystem.UpdateAfter<VanillaLevellingObserverSystem, SelectiveZoneCheckSystem>(SystemUpdatePhase.ModificationEnd);
+#endif
 
             // Check for Realistic Workplaces and Households mod.
             foreach (ModManager.ModInfo modInfo in GameManager.instance.modManager)
